@@ -17,6 +17,115 @@ type SetupCmd struct {
 	Force bool `help:"Re-download even if files exist." short:"f"`
 }
 
+type UninstallCmd struct{}
+
+func (cmd *UninstallCmd) Run(rc *RunContext) error {
+	cmd.removeHooks()
+	cmd.removeSkill()
+	cmd.removeModels()
+
+	fmt.Fprintln(
+		os.Stderr,
+		"uninstall complete. database at ~/.obliscence/db.sqlite was preserved.",
+	)
+	return nil
+}
+
+// removeHooks removes obliscence hook entries from ~/.claude/settings.json.
+func (cmd *UninstallCmd) removeHooks() {
+	settingsPath := expandPath("~/.claude/settings.json")
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "no settings.json found, skipping hook removal")
+		return
+	}
+
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &settings); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: could not parse settings.json, skipping hook removal")
+		return
+	}
+
+	raw, ok := settings["hooks"]
+	if !ok {
+		fmt.Fprintln(os.Stderr, "no hooks found in settings.json")
+		return
+	}
+
+	var hooks map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &hooks); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: could not parse hooks, skipping hook removal")
+		return
+	}
+
+	changed := false
+	for _, event := range []string{"SessionEnd", "PreCompact"} {
+		existing, ok := hooks[event]
+		if !ok {
+			continue
+		}
+		if strings.Contains(string(existing), "obliscence hook") {
+			delete(hooks, event)
+			changed = true
+		}
+	}
+
+	if !changed {
+		fmt.Fprintln(os.Stderr, "no obliscence hooks found")
+		return
+	}
+
+	if len(hooks) == 0 {
+		delete(settings, "hooks")
+	} else {
+		hooksJSON, _ := json.Marshal(hooks)
+		settings["hooks"] = hooksJSON
+	}
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not serialize settings: %v\n", err)
+		return
+	}
+
+	if err := os.WriteFile(settingsPath, append(out, '\n'), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write settings.json: %v\n", err)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "removed hooks from ~/.claude/settings.json")
+}
+
+// removeSkill removes the search-history skill from ~/.claude/skills/.
+func (cmd *UninstallCmd) removeSkill() {
+	skillDir := expandPath("~/.claude/skills/search-history")
+	if _, err := os.Stat(skillDir); os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, "skill not installed, skipping")
+		return
+	}
+
+	if err := os.RemoveAll(skillDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not remove skill: %v\n", err)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "removed skill from ~/.claude/skills/search-history/")
+}
+
+// removeModels removes the downloaded ONNX Runtime and model files.
+func (cmd *UninstallCmd) removeModels() {
+	dir := modelsDir()
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, "no models directory found, skipping")
+		return
+	}
+
+	if err := os.RemoveAll(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not remove models: %v\n", err)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "removed models from ~/.obliscence/models/")
+}
+
 const (
 	onnxRuntimeVersion = "1.22.0"
 	modelName          = "sentence-transformers/all-MiniLM-L6-v2"
@@ -29,9 +138,17 @@ func modelsDir() string {
 
 func onnxRuntimeLibPath() string {
 	if runtime.GOOS == "darwin" {
-		return filepath.Join(modelsDir(), "onnxruntime", fmt.Sprintf("libonnxruntime.%s.dylib", onnxRuntimeVersion))
+		return filepath.Join(
+			modelsDir(),
+			"onnxruntime",
+			fmt.Sprintf("libonnxruntime.%s.dylib", onnxRuntimeVersion),
+		)
 	}
-	return filepath.Join(modelsDir(), "onnxruntime", fmt.Sprintf("libonnxruntime.so.%s", onnxRuntimeVersion))
+	return filepath.Join(
+		modelsDir(),
+		"onnxruntime",
+		fmt.Sprintf("libonnxruntime.so.%s", onnxRuntimeVersion),
+	)
 }
 
 func onnxModelPath() string {
@@ -82,7 +199,9 @@ func (cmd *SetupCmd) installHooks() {
 		hooks = make(map[string]json.RawMessage)
 	}
 
-	hookEntry := json.RawMessage(`[{"matcher":"","hooks":[{"type":"command","command":"obliscence hook","async":true,"suppressOutput":true}]}]`)
+	hookEntry := json.RawMessage(
+		`[{"matcher":"","hooks":[{"type":"command","command":"obliscence hook","async":true,"suppressOutput":true}]}]`,
+	)
 
 	changed := false
 	for _, event := range []string{"SessionEnd", "PreCompact"} {
@@ -118,11 +237,10 @@ func (cmd *SetupCmd) installHooks() {
 const skillContent = `---
 name: search-history
 description: >-
-  Search previous Claude Code conversations for past work, decisions, and solutions.
-  Use when the user asks "what did we do", "remember when", "in a previous session",
-  "how did we solve this before", "last time we worked on", "did we ever", or needs
-  context from past conversations. Also use proactively when the user is about to
-  re-solve a problem that may have been addressed before.
+  Search past conversations via obliscence. USE PROACTIVELY — invoke BEFORE codebase
+  searches when the user recalls past work. Triggers: "remind me", "where does X live",
+  "what did we do", "remember when", "how did we solve", "last time", "did we ever",
+  "which repo", "which project", "in a previous session".
 ---
 
 Search past Claude Code conversations using obliscence. Use ` + "`--json`" + ` for structured output,
@@ -204,7 +322,10 @@ func (cmd *SetupCmd) downloadONNXRuntime() error {
 	dest := onnxRuntimeLibPath()
 	if !cmd.Force {
 		if _, err := os.Stat(dest); err == nil {
-			fmt.Fprintln(os.Stderr, "ONNX Runtime already downloaded, skipping (use --force to re-download)")
+			fmt.Fprintln(
+				os.Stderr,
+				"ONNX Runtime already downloaded, skipping (use --force to re-download)",
+			)
 			return nil
 		}
 	}
@@ -227,7 +348,10 @@ func (cmd *SetupCmd) downloadModel() error {
 	dest := onnxModelPath()
 	if !cmd.Force {
 		if _, err := os.Stat(dest); err == nil {
-			fmt.Fprintln(os.Stderr, "model already downloaded, skipping (use --force to re-download)")
+			fmt.Fprintln(
+				os.Stderr,
+				"model already downloaded, skipping (use --force to re-download)",
+			)
 			return nil
 		}
 	}
@@ -248,7 +372,10 @@ func (cmd *SetupCmd) downloadModel() error {
 }
 
 func onnxRuntimeURL() string {
-	base := fmt.Sprintf("https://github.com/microsoft/onnxruntime/releases/download/v%s", onnxRuntimeVersion)
+	base := fmt.Sprintf(
+		"https://github.com/microsoft/onnxruntime/releases/download/v%s",
+		onnxRuntimeVersion,
+	)
 	switch {
 	case runtime.GOOS == "darwin" && runtime.GOARCH == "arm64":
 		return fmt.Sprintf("%s/onnxruntime-osx-arm64-%s.tgz", base, onnxRuntimeVersion)
@@ -340,7 +467,12 @@ func downloadAndExtractTgz(url, destLib string) error {
 				os.Remove(tmp)
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "  extracted %s (%s)\n", filepath.Base(destLib), formatBytes(written))
+			fmt.Fprintf(
+				os.Stderr,
+				"  extracted %s (%s)\n",
+				filepath.Base(destLib),
+				formatBytes(written),
+			)
 			return os.Rename(tmp, destLib)
 		}
 	}

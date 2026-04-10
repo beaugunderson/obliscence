@@ -25,7 +25,8 @@ Requires CGo (mattn/go-sqlite3 + daulet/tokenizers). The Makefile auto-downloads
 ## Usage
 
 ```
-obliscence setup              # Download ONNX model for semantic search (~120MB)
+obliscence setup              # Download models, install hooks + skill
+obliscence uninstall          # Remove hooks, skill, and downloaded models
 obliscence index              # Index new/changed sessions
 obliscence search "query"     # Full-text search (BM25)
 obliscence search --semantic  # Vector similarity search
@@ -66,10 +67,15 @@ obliscence search "terraform" --json | jq '.[].snippet'
 `obliscence setup` does everything:
 
 1. Downloads ONNX Runtime + all-MiniLM-L6-v2 model (~55MB total) for semantic search
-2. Installs Claude Code hooks (`SessionEnd` + `PreCompact`) for automatic indexing
+2. Installs Claude Code hooks in `~/.claude/settings.json`:
+   - `SessionEnd` — indexes the conversation when a session ends
+   - `PreCompact` — indexes before context compaction so no messages are lost
+   - Both run `obliscence hook` asynchronously with suppressed output
 3. Installs the `/search-history` skill so Claude uses obliscence proactively
 
-All inference runs locally — no API calls, no server process. Hooks and skill can also be installed manually (see below).
+All inference runs locally — no API calls, no server process.
+
+To remove everything: `obliscence uninstall` (removes hooks, skill, and downloaded models).
 
 ## Semantic search
 
@@ -88,53 +94,6 @@ All inference runs locally — no API calls, no server process. Hooks and skill 
 ## Incremental indexing
 
 `obliscence index` scans `~/.claude/projects/` for JSONL files. Only new or changed files are processed (tracked by mtime + size).
-
-## Manual hook/skill installation
-
-If you prefer not to use `obliscence setup` for hooks and skill, you can install them manually.
-
-<details>
-<summary>Hooks (add to ~/.claude/settings.json)</summary>
-
-```json
-{
-  "hooks": {
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "obliscence hook",
-            "async": true,
-            "suppressOutput": true
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "obliscence hook",
-            "async": true,
-            "suppressOutput": true
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-</details>
-
-<details>
-<summary>Skill (copy .claude/skills/search-history/ to ~/.claude/skills/)</summary>
-
-The skill description teaches Claude to invoke obliscence automatically when you ask about past work, previous sessions, or prior solutions.
-</details>
 
 ## Database
 

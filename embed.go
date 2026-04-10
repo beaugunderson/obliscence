@@ -138,7 +138,9 @@ func (e *Embedder) Embed(text string) ([]float32, error) {
 	defer typeTensor.Destroy()
 
 	// Create output tensor.
-	outputTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(1, int64(seqLen), int64(embeddingDim)))
+	outputTensor, err := ort.NewEmptyTensor[float32](
+		ort.NewShape(1, int64(seqLen), int64(embeddingDim)),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("creating output tensor: %w", err)
 	}

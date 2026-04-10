@@ -11,7 +11,7 @@ import (
 // SessionsCmd lists sessions.
 type SessionsCmd struct {
 	Project string `help:"Filter by project name." short:"p"`
-	Limit   int    `help:"Max results." default:"20" short:"l"`
+	Limit   int    `help:"Max results."            short:"l" default:"20"`
 }
 
 type SessionRow struct {
@@ -59,7 +59,16 @@ func (cmd *SessionsCmd) Run(rc *RunContext) error {
 	for rows.Next() {
 		var s SessionRow
 		var model, branch, slug sql.NullString
-		err := rows.Scan(&s.ID, &s.ProjectName, &slug, &model, &branch, &s.StartedAt, &s.UpdatedAt, &s.Messages)
+		err := rows.Scan(
+			&s.ID,
+			&s.ProjectName,
+			&slug,
+			&model,
+			&branch,
+			&s.StartedAt,
+			&s.UpdatedAt,
+			&s.Messages,
+		)
 		if err != nil {
 			return err
 		}
@@ -100,10 +109,12 @@ type ShowCmd struct {
 func (cmd *ShowCmd) Run(rc *RunContext) error {
 	// Try by ID first, then by slug.
 	var sessionID string
-	err := rc.DB.QueryRow("SELECT id FROM sessions WHERE id = ? OR slug = ?", cmd.Session, cmd.Session).Scan(&sessionID)
+	err := rc.DB.QueryRow("SELECT id FROM sessions WHERE id = ? OR slug = ?", cmd.Session, cmd.Session).
+		Scan(&sessionID)
 	if err == sql.ErrNoRows {
 		// Try partial match on slug.
-		err = rc.DB.QueryRow("SELECT id FROM sessions WHERE slug LIKE ?", "%"+cmd.Session+"%").Scan(&sessionID)
+		err = rc.DB.QueryRow("SELECT id FROM sessions WHERE slug LIKE ?", "%"+cmd.Session+"%").
+			Scan(&sessionID)
 	}
 	if err != nil {
 		return fmt.Errorf("session not found: %s", cmd.Session)
@@ -178,13 +189,16 @@ func (cmd *StatsCmd) Run(rc *RunContext) error {
 	rc.DB.QueryRow("SELECT COUNT(*) FROM messages").Scan(&stats.Messages)
 	rc.DB.QueryRow("SELECT COUNT(*) FROM tool_uses").Scan(&stats.ToolUses)
 	rc.DB.QueryRow("SELECT COUNT(DISTINCT project_name) FROM sessions").Scan(&stats.Projects)
-	rc.DB.QueryRow("SELECT COALESCE(MIN(CASE WHEN started_at != '' THEN started_at END), MIN(updated_at), '') FROM sessions").Scan(&stats.OldestDate)
+	rc.DB.QueryRow("SELECT COALESCE(MIN(CASE WHEN started_at != '' THEN started_at END), MIN(updated_at), '') FROM sessions").
+		Scan(&stats.OldestDate)
 	rc.DB.QueryRow("SELECT COALESCE(MAX(updated_at), '') FROM sessions").Scan(&stats.NewestDate)
 
 	// DB file size.
 	var seq int
 	var name, dbPath string
-	if err := rc.DB.QueryRow("PRAGMA database_list").Scan(&seq, &name, &dbPath); err == nil && dbPath != "" {
+	if err := rc.DB.QueryRow("PRAGMA database_list").
+		Scan(&seq, &name, &dbPath); err == nil &&
+		dbPath != "" {
 		if fi, err := os.Stat(dbPath); err == nil {
 			stats.DBSize = formatBytes(fi.Size())
 		}

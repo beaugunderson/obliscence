@@ -9,13 +9,13 @@ import (
 
 type SearchCmd struct {
 	Query    string `arg:"" help:"Search query."`
-	Project  string `help:"Filter by project name." short:"p"`
-	Role     string `help:"Filter by role (user, assistant)." short:"r"`
-	Limit    int    `help:"Max results." default:"20" short:"l"`
-	After    string `help:"Only results after this date (YYYY-MM-DD)." short:"a"`
-	Before   string `help:"Only results before this date (YYYY-MM-DD)." short:"b"`
-	Semantic bool   `help:"Use semantic (vector) search." name:"semantic"`
-	Hybrid   bool   `help:"Combine FTS5 and semantic search." name:"hybrid"`
+	Project  string `       help:"Filter by project name."                     short:"p"`
+	Role     string `       help:"Filter by role (user, assistant)."           short:"r"`
+	Limit    int    `       help:"Max results."                                short:"l" default:"20"`
+	After    string `       help:"Only results after this date (YYYY-MM-DD)."  short:"a"`
+	Before   string `       help:"Only results before this date (YYYY-MM-DD)." short:"b"`
+	Semantic bool   `       help:"Use semantic (vector) search."                                      name:"semantic"`
+	Hybrid   bool   `       help:"Combine FTS5 and semantic search."                                  name:"hybrid"`
 }
 
 type SearchResult struct {
@@ -133,7 +133,8 @@ func (cmd *SearchCmd) filterResults(results []SearchResult) []SearchResult {
 
 	var filtered []SearchResult
 	for _, r := range results {
-		if cmd.Project != "" && !strings.Contains(strings.ToLower(r.Project), strings.ToLower(cmd.Project)) {
+		if cmd.Project != "" &&
+			!strings.Contains(strings.ToLower(r.Project), strings.ToLower(cmd.Project)) {
 			continue
 		}
 		if cmd.Role != "" && r.Role != cmd.Role {
@@ -274,7 +275,11 @@ func (cmd *SearchCmd) ftsResults(rc *RunContext) ([]SearchResult, error) {
 }
 
 // semanticResults returns vector search results as a slice (for hybrid merging).
-func (cmd *SearchCmd) semanticResults(rc *RunContext, queryVec []float32, limit int) ([]SearchResult, error) {
+func (cmd *SearchCmd) semanticResults(
+	rc *RunContext,
+	queryVec []float32,
+	limit int,
+) ([]SearchResult, error) {
 	serialized, err := serializeVec(queryVec)
 	if err != nil {
 		return nil, err
@@ -336,7 +341,8 @@ func (cmd *SearchCmd) collectAndPrint(rc *RunContext, rows *sql.Rows, isSemantic
 func (cmd *SearchCmd) printResults(rc *RunContext, results []SearchResult) error {
 	if rc.JSON {
 		for i := range results {
-			results[i].Snippet = strings.NewReplacer("\x02", "", "\x03", "").Replace(results[i].Snippet)
+			results[i].Snippet = strings.NewReplacer("\x02", "", "\x03", "").
+				Replace(results[i].Snippet)
 		}
 		return printJSON(results)
 	}

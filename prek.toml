@@ -1,0 +1,41 @@
+[[repos]]
+repo = "https://github.com/golangci/golines"
+rev = "v0.15.0"
+hooks = [{ id = "golines", args = ["--max-len=99"] }]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "go-fmt"
+name = "go fmt"
+language = "system"
+entry = "gofmt -l -w"
+types = ["go"]
+
+[[repos.hooks]]
+id = "go-vet"
+name = "go vet"
+language = "system"
+entry = "go vet -tags sqlite_fts5 ./..."
+pass_filenames = false
+types = ["go"]
+env = { CGO_LDFLAGS = "-L./lib -Wl,-no_warn_duplicate_libraries", CGO_CFLAGS = "-Wno-deprecated-declarations" }
+
+[[repos.hooks]]
+id = "go-build"
+name = "go build"
+language = "system"
+entry = "go build -tags sqlite_fts5 ./..."
+pass_filenames = false
+types = ["go"]
+env = { CGO_LDFLAGS = "-L./lib -Wl,-no_warn_duplicate_libraries", CGO_CFLAGS = "-Wno-deprecated-declarations" }
+
+[[repos.hooks]]
+id = "go-test"
+name = "go test"
+language = "system"
+entry = "go test -tags sqlite_fts5 -short ./..."
+pass_filenames = false
+types = ["go"]
+env = { CGO_LDFLAGS = "-L./lib -Wl,-no_warn_duplicate_libraries", CGO_CFLAGS = "-Wno-deprecated-declarations" }

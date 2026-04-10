@@ -14,10 +14,10 @@ import (
 )
 
 type IndexCmd struct {
-	Session string `help:"Index a specific session by UUID." short:"s"`
+	Session string `help:"Index a specific session by UUID."   short:"s"`
 	Force   bool   `help:"Force full reindex of all sessions." short:"f"`
-	Verbose bool   `help:"Show what's being indexed." short:"v"`
-	NoEmbed bool   `help:"Skip embedding generation." name:"no-embed"`
+	Verbose bool   `help:"Show what's being indexed."          short:"v"`
+	NoEmbed bool   `help:"Skip embedding generation."                    name:"no-embed"`
 }
 
 func (cmd *IndexCmd) Run(rc *RunContext) error {
@@ -29,7 +29,11 @@ func (cmd *IndexCmd) Run(rc *RunContext) error {
 		var err error
 		embedder, err = NewEmbedder()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: embedder init failed: %v (continuing without embeddings)\n", err)
+			fmt.Fprintf(
+				os.Stderr,
+				"warning: embedder init failed: %v (continuing without embeddings)\n",
+				err,
+			)
 		} else if embedder != nil {
 			defer embedder.Close()
 			if cmd.Verbose {
@@ -558,7 +562,17 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 	}
 
 	for _, m := range messages {
-		_, err = stmts.insertMsg.Exec(m.id, sess.id, m.parentID, m.role, m.content, m.timestamp, m.isCompactSummary, m.inputTokens, m.outputTokens)
+		_, err = stmts.insertMsg.Exec(
+			m.id,
+			sess.id,
+			m.parentID,
+			m.role,
+			m.content,
+			m.timestamp,
+			m.isCompactSummary,
+			m.inputTokens,
+			m.outputTokens,
+		)
 		if err != nil {
 			return fmt.Errorf("inserting message: %w", err)
 		}

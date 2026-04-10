@@ -12,15 +12,16 @@ var cli struct {
 	JSON    bool   `help:"Output JSON." name:"json"`
 	Profile string `help:"Write CPU profile to file." hidden:""`
 
-	Index    IndexCmd    `cmd:"" help:"Index new/changed sessions."`
-	Search   SearchCmd   `cmd:"" help:"Search conversations."`
-	Sessions SessionsCmd `cmd:"" help:"List sessions."`
-	Show     ShowCmd     `cmd:"" help:"Show a session conversation."`
-	Resume   ResumeCmd   `cmd:"" help:"Resume a session in Claude Code."`
-	Stats    StatsCmd    `cmd:"" help:"Database statistics."`
-	Projects ProjectsCmd `cmd:"" help:"List projects."`
-	Setup    SetupCmd    `cmd:"" help:"Download ONNX model for semantic search."`
-	Hook     HookCmd     `cmd:"" help:"Handle Claude Code hook invocation." hidden:""`
+	Index     IndexCmd     `cmd:"" help:"Index new/changed sessions."`
+	Search    SearchCmd    `cmd:"" help:"Search conversations."`
+	Sessions  SessionsCmd  `cmd:"" help:"List sessions."`
+	Show      ShowCmd      `cmd:"" help:"Show a session conversation."`
+	Resume    ResumeCmd    `cmd:"" help:"Resume a session in Claude Code."`
+	Stats     StatsCmd     `cmd:"" help:"Database statistics."`
+	Projects  ProjectsCmd  `cmd:"" help:"List projects."`
+	Setup     SetupCmd     `cmd:"" help:"Download models, install hooks and skill."`
+	Uninstall UninstallCmd `cmd:"" help:"Remove hooks, skill, and downloaded models."`
+	Hook      HookCmd      `cmd:"" help:"Handle Claude Code hook invocation." hidden:""`
 }
 
 func main() {
