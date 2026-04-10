@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,8 +52,152 @@ func (cmd *SetupCmd) Run(rc *RunContext) error {
 		return fmt.Errorf("downloading model: %w", err)
 	}
 
+	cmd.installHooks()
+	cmd.installSkill()
+
 	fmt.Fprintln(os.Stderr, "setup complete. run 'obliscence index' to generate embeddings.")
 	return nil
+}
+
+// installHooks adds SessionEnd and PreCompact hooks to ~/.claude/settings.json.
+func (cmd *SetupCmd) installHooks() {
+	settingsPath := expandPath("~/.claude/settings.json")
+
+	// Read existing settings.
+	var settings map[string]json.RawMessage
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		settings = make(map[string]json.RawMessage)
+	} else if err := json.Unmarshal(data, &settings); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: could not parse settings.json, skipping hook install")
+		return
+	}
+
+	// Check if our hooks are already present.
+	var hooks map[string]json.RawMessage
+	if raw, ok := settings["hooks"]; ok {
+		json.Unmarshal(raw, &hooks)
+	}
+	if hooks == nil {
+		hooks = make(map[string]json.RawMessage)
+	}
+
+	hookEntry := json.RawMessage(`[{"matcher":"","hooks":[{"type":"command","command":"obliscence hook","async":true,"suppressOutput":true}]}]`)
+
+	changed := false
+	for _, event := range []string{"SessionEnd", "PreCompact"} {
+		existing, _ := hooks[event]
+		if existing != nil && strings.Contains(string(existing), "obliscence hook") {
+			continue
+		}
+		hooks[event] = hookEntry
+		changed = true
+	}
+
+	if !changed {
+		fmt.Fprintln(os.Stderr, "hooks already installed")
+		return
+	}
+
+	hooksJSON, _ := json.Marshal(hooks)
+	settings["hooks"] = hooksJSON
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not serialize settings: %v\n", err)
+		return
+	}
+
+	if err := os.WriteFile(settingsPath, append(out, '\n'), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write settings.json: %v\n", err)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "installed hooks in ~/.claude/settings.json")
+}
+
+const skillContent = `---
+name: search-history
+description: >-
+  Search previous Claude Code conversations for past work, decisions, and solutions.
+  Use when the user asks "what did we do", "remember when", "in a previous session",
+  "how did we solve this before", "last time we worked on", "did we ever", or needs
+  context from past conversations. Also use proactively when the user is about to
+  re-solve a problem that may have been addressed before.
+---
+
+Search past Claude Code conversations using obliscence. Use ` + "`--json`" + ` for structured output,
+` + "`--semantic`" + ` for meaning-based search, ` + "`--hybrid`" + ` for best results combining keyword + semantic.
+
+## Choosing a search mode
+
+- **Keyword search** (default): Best when the user remembers specific terms, error messages, file names, or tool names.
+- **Semantic search** (` + "`--semantic`" + `): Best for conceptual queries like "how did we handle rate limiting". Finds results by meaning, not exact words.
+- **Hybrid search** (` + "`--hybrid`" + `): Best general-purpose choice when unsure. Combines keyword and semantic via reciprocal rank fusion.
+
+## Commands
+
+` + "```" + `bash
+# Search (start with --hybrid for best results)
+obliscence search "$QUERY" --hybrid --json
+
+# Keyword-only search (when user mentions specific terms)
+obliscence search "$QUERY" --json
+
+# Semantic search (when query is conceptual/natural language)
+obliscence search "$QUERY" --semantic --json
+
+# Filter by project
+obliscence search "$QUERY" --hybrid --project PROJECT_NAME --json
+
+# Filter by role (user messages vs assistant responses)
+obliscence search "$QUERY" --hybrid --role user --json
+
+# Filter by date range
+obliscence search "$QUERY" --hybrid --after 2026-01-01 --before 2026-04-01 --json
+
+# List recent sessions for a project
+obliscence sessions --project PROJECT_NAME --json --limit 20
+
+# Show a full conversation
+obliscence show SESSION_ID_OR_SLUG
+
+# Resume a past session
+obliscence resume SESSION_ID_OR_SLUG
+
+# List all projects
+obliscence projects --json
+` + "```" + `
+
+## Tips
+
+- Start broad, then narrow with ` + "`--project`" + ` or ` + "`--role`" + ` filters.
+- Use ` + "`obliscence show SLUG`" + ` to read the full conversation once you find a relevant result.
+- Session slugs (like ` + "`warm-wondering-quill`" + `) are stable identifiers.
+- When the user says "we worked on X recently", add ` + "`--after`" + ` with a date ~2 weeks back.
+`
+
+// installSkill writes the search-history skill to ~/.claude/skills/.
+func (cmd *SetupCmd) installSkill() {
+	skillDir := expandPath("~/.claude/skills/search-history")
+	skillPath := filepath.Join(skillDir, "SKILL.md")
+
+	if !cmd.Force {
+		if _, err := os.Stat(skillPath); err == nil {
+			fmt.Fprintln(os.Stderr, "skill already installed")
+			return
+		}
+	}
+
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not create skill dir: %v\n", err)
+		return
+	}
+
+	if err := os.WriteFile(skillPath, []byte(skillContent), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write skill: %v\n", err)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "installed skill at ~/.claude/skills/search-history/")
 }
 
 func (cmd *SetupCmd) downloadONNXRuntime() error {

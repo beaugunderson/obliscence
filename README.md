@@ -49,31 +49,40 @@ obliscence show warm-wondering-quill
 obliscence search "terraform" --json | jq '.[].snippet'
 ```
 
+## Setup
+
+`obliscence setup` does everything:
+
+1. Downloads ONNX Runtime + all-MiniLM-L6-v2 model (~55MB total) for semantic search
+2. Installs Claude Code hooks (`SessionEnd` + `PreCompact`) for automatic indexing
+3. Installs the `/search-history` skill so Claude uses obliscence proactively
+
+All inference runs locally — no API calls, no server process. Hooks and skill can also be installed manually (see below).
+
 ## Semantic search
 
-`obliscence setup` downloads the ONNX Runtime and sentence-transformers/all-MiniLM-L6-v2 model (~120MB total) to `~/.obliscence/models/`. All inference runs locally — no API calls, no server process.
-
-Embeddings are generated during `obliscence index` (skip with `--no-embed`). `--semantic` finds results by meaning — "how to fix flaky tests" matches discussions about test reliability even without the word "flaky". `--hybrid` merges keyword and semantic results via reciprocal rank fusion.
+`--semantic` finds results by meaning — "how to fix flaky tests" matches discussions about test reliability even without the word "flaky". `--hybrid` merges keyword and semantic results via reciprocal rank fusion. Embeddings are generated during `obliscence index` (skip with `--no-embed`).
 
 ## Performance
 
 | Operation | Time |
 |-----------|------|
-| Full index (text only) | ~10s for ~1,800 sessions |
-| Full index (with embeddings) | ~5min for ~36k messages |
-| Incremental re-index | ~300ms |
+| Full index (text only) | ~8s for ~1,800 sessions |
+| Full index (with embeddings) | ~1min for ~14k messages |
+| Incremental re-index | ~2s |
 | FTS5 search | instant |
 | Semantic search | ~1s |
-| DB size (text only) | ~28 MB |
-| DB size (with embeddings) | ~59 MB |
 
 ## Incremental indexing
 
-`obliscence index` scans `~/.claude/projects/` for JSONL files. Only new or changed files are processed (tracked by mtime + size). Re-indexing with no changes takes ~300ms.
+`obliscence index` scans `~/.claude/projects/` for JSONL files. Only new or changed files are processed (tracked by mtime + size).
 
-## Claude Code hooks
+## Manual hook/skill installation
 
-Add to `~/.claude/settings.json` for automatic indexing at session end and before compaction:
+If you prefer not to use `obliscence setup` for hooks and skill, you can install them manually.
+
+<details>
+<summary>Hooks (add to ~/.claude/settings.json)</summary>
 
 ```json
 {
@@ -107,10 +116,13 @@ Add to `~/.claude/settings.json` for automatic indexing at session end and befor
   }
 }
 ```
+</details>
 
-## Claude Code skill
+<details>
+<summary>Skill (copy .claude/skills/search-history/ to ~/.claude/skills/)</summary>
 
-Copy `.claude/skills/search-history/` to `~/.claude/skills/` for Claude to use this tool proactively. The skill description teaches Claude to invoke obliscence automatically when you ask about past work, previous sessions, or prior solutions — no need to type `/search-history` explicitly.
+The skill description teaches Claude to invoke obliscence automatically when you ask about past work, previous sessions, or prior solutions.
+</details>
 
 ## Database
 
