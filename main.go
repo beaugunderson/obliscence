@@ -2,13 +2,15 @@ package main
 
 import (
 	"os"
+	"runtime/pprof"
 
 	"github.com/alecthomas/kong"
 )
 
 var cli struct {
-	DB   string `help:"Database path." default:"~/.obliscence/db.sqlite" env:"OBLISCENCE_DB"`
-	JSON bool   `help:"Output JSON." name:"json"`
+	DB      string `help:"Database path." default:"~/.obliscence/db.sqlite" env:"OBLISCENCE_DB"`
+	JSON    bool   `help:"Output JSON." name:"json"`
+	Profile string `help:"Write CPU profile to file." hidden:""`
 
 	Index    IndexCmd    `cmd:"" help:"Index new/changed sessions."`
 	Search   SearchCmd   `cmd:"" help:"Search conversations."`
@@ -27,6 +29,13 @@ func main() {
 		kong.Description("Archive and search Claude Code conversations."),
 		kong.UsageOnError(),
 	)
+
+	if cli.Profile != "" {
+		f, err := os.Create(cli.Profile)
+		ctx.FatalIfErrorf(err)
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
 
 	dbPath := expandPath(cli.DB)
 	if err := os.MkdirAll(dirOf(dbPath), 0o755); err != nil {

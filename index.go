@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -57,27 +59,52 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 		return fmt.Errorf("reading projects dir: %w", err)
 	}
 
-	// Collect all JSONL files and partition into needs-indexing vs skip.
-	var toIndex, allFiles []string
+	// Load all indexed file states into memory to avoid per-file DB queries.
+	indexedFiles, err := loadIndexedFiles(rc.DB)
+	if err != nil {
+		return fmt.Errorf("loading index state: %w", err)
+	}
+
+	// Collect all JSONL files and check which need indexing.
+	// Parallelize directory scanning since os.Stat is the bottleneck.
+	type scanResult struct {
+		all     []string
+		changed []string
+	}
+
+	var dirs []string
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+		if entry.IsDir() {
+			dirs = append(dirs, filepath.Join(projectsDir, entry.Name()))
 		}
-		dirPath := filepath.Join(projectsDir, entry.Name())
-		jsonlFiles, err := filepath.Glob(filepath.Join(dirPath, "*.jsonl"))
-		if err != nil {
-			continue
-		}
-		for _, path := range jsonlFiles {
-			allFiles = append(allFiles, path)
-			changed, err := cmd.needsIndexing(rc.DB, path)
+	}
+
+	results := make([]scanResult, len(dirs))
+	var wg sync.WaitGroup
+	for i, dir := range dirs {
+		wg.Add(1)
+		go func(i int, dir string) {
+			defer wg.Done()
+			jsonlFiles, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 			if err != nil {
-				continue
+				return
 			}
-			if changed {
-				toIndex = append(toIndex, path)
+			var r scanResult
+			for _, path := range jsonlFiles {
+				r.all = append(r.all, path)
+				if needsIndexing(indexedFiles, path) {
+					r.changed = append(r.changed, path)
+				}
 			}
-		}
+			results[i] = r
+		}(i, dir)
+	}
+	wg.Wait()
+
+	var toIndex, allFiles []string
+	for _, r := range results {
+		allFiles = append(allFiles, r.all...)
+		toIndex = append(toIndex, r.changed...)
 	}
 
 	skipped := len(allFiles) - len(toIndex)
@@ -89,9 +116,30 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 	}
 
 	// Pass 1: Text indexing (fast — makes FTS5 search available immediately).
+	// Use a single transaction with pre-prepared statements for all files.
+	// For bulk indexing (>10 files), disable FTS triggers and rebuild after.
+	bulkMode := len(toIndex) > 10
 	var indexed, errored int
 	showProgress := isTTY && !cmd.Verbose && !rc.JSON
 	start := time.Now()
+
+	tx, err := rc.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if bulkMode {
+		tx.Exec("DROP TRIGGER IF EXISTS messages_ai")
+		tx.Exec("DROP TRIGGER IF EXISTS messages_ad")
+		tx.Exec("DROP TRIGGER IF EXISTS messages_au")
+	}
+
+	stmts, err := prepareIndexStmts(tx)
+	if err != nil {
+		return err
+	}
+	defer stmts.Close()
 
 	for i, path := range toIndex {
 		if cmd.Verbose {
@@ -100,7 +148,7 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 			printProgress("indexing", i, len(toIndex), start)
 		}
 
-		if err := indexFile(rc.DB, path); err != nil {
+		if err := indexFile(tx, stmts, path); err != nil {
 			if cmd.Verbose {
 				fmt.Fprintf(os.Stderr, "error indexing %s: %v\n", path, err)
 			}
@@ -108,6 +156,26 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 			continue
 		}
 		indexed++
+	}
+
+	if bulkMode {
+		// Rebuild FTS index from scratch.
+		tx.Exec("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+		// Recreate triggers for future incremental updates.
+		tx.Exec(`CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+			INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+		END`)
+		tx.Exec(`CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+			INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+		END`)
+		tx.Exec(`CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+			INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+			INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+		END`)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing index: %w", err)
 	}
 
 	if showProgress {
@@ -163,35 +231,65 @@ func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
 	}
 	defer rows.Close()
 
+	// Collect rowid/content pairs first so we can use a write transaction.
+	type embedItem struct {
+		rowid   int64
+		content string
+	}
+	var items []embedItem
+	for rows.Next() {
+		var item embedItem
+		if err := rows.Scan(&item.rowid, &item.content); err != nil {
+			continue
+		}
+		items = append(items, item)
+	}
+	rows.Close()
+
 	showProgress := isTTY && !cmd.Verbose && !rc.JSON
 	start := time.Now()
 	var done int
 
-	for rows.Next() {
-		var rowid int64
-		var content string
-		if err := rows.Scan(&rowid, &content); err != nil {
-			continue
+	// Process in batches with a transaction per batch.
+	const batchSize = 100
+	for i := 0; i < len(items); i += batchSize {
+		end := i + batchSize
+		if end > len(items) {
+			end = len(items)
 		}
+		batch := items[i:end]
 
-		vec, err := embedder.Embed(content)
+		tx, err := rc.DB.Begin()
 		if err != nil {
-			continue
+			return err
 		}
 
-		serialized, err := serializeVec(vec)
+		stmt, err := tx.Prepare(
+			"INSERT OR IGNORE INTO messages_vec(embedding, message_rowid) VALUES (?, ?)")
 		if err != nil {
-			continue
+			tx.Rollback()
+			return err
 		}
 
-		_, _ = rc.DB.Exec(
-			"INSERT OR IGNORE INTO messages_vec(embedding, message_rowid) VALUES (?, ?)",
-			serialized, rowid,
-		)
+		for _, item := range batch {
+			vec, err := embedder.Embed(item.content)
+			if err != nil {
+				continue
+			}
+			serialized, err := serializeVec(vec)
+			if err != nil {
+				continue
+			}
+			_, _ = stmt.Exec(serialized, item.rowid)
+			done++
+			if showProgress {
+				printProgress("embedding", done, total, start)
+			}
+		}
 
-		done++
-		if showProgress {
-			printProgress("embedding", done, total, start)
+		stmt.Close()
+		if err := tx.Commit(); err != nil {
+			return err
 		}
 	}
 
@@ -227,7 +325,6 @@ func printProgress(label string, done, total int, start time.Time) {
 }
 
 func (cmd *IndexCmd) indexSession(rc *RunContext, projectsDir string) error {
-	// Find the JSONL file for this session UUID.
 	pattern := filepath.Join(projectsDir, "*", cmd.Session+".jsonl")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
@@ -236,35 +333,117 @@ func (cmd *IndexCmd) indexSession(rc *RunContext, projectsDir string) error {
 	if len(matches) == 0 {
 		return fmt.Errorf("session %s not found", cmd.Session)
 	}
-	return indexFile(rc.DB, matches[0])
+
+	tx, err := rc.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmts, err := prepareIndexStmts(tx)
+	if err != nil {
+		return err
+	}
+	defer stmts.Close()
+
+	if err := indexFile(tx, stmts, matches[0]); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func (cmd *IndexCmd) needsIndexing(db *sql.DB, path string) (bool, error) {
+type fileState struct {
+	mtime float64
+	size  int64
+}
+
+// loadIndexedFiles loads all indexed file states into a map for fast lookup.
+func loadIndexedFiles(db *sql.DB) (map[string]fileState, error) {
+	rows, err := db.Query("SELECT path, mtime, size FROM indexed_files")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	m := make(map[string]fileState)
+	for rows.Next() {
+		var path string
+		var fs fileState
+		if err := rows.Scan(&path, &fs.mtime, &fs.size); err != nil {
+			continue
+		}
+		m[path] = fs
+	}
+	return m, nil
+}
+
+// needsIndexing checks if a file has changed since last index using the in-memory map.
+func needsIndexing(indexed map[string]fileState, path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
-		return false, err
+		return false
 	}
-
-	var storedMtime float64
-	var storedSize int64
-	err = db.QueryRow(
-		"SELECT mtime, size FROM indexed_files WHERE path = ?",
-		path,
-	).Scan(&storedMtime, &storedSize)
-
-	if err == sql.ErrNoRows {
-		return true, nil
+	stored, ok := indexed[path]
+	if !ok {
+		return true
 	}
-	if err != nil {
-		return false, err
-	}
-
 	mtime := float64(info.ModTime().UnixMicro()) / 1e6
-	return mtime != storedMtime || info.Size() != storedSize, nil
+	return mtime != stored.mtime || info.Size() != stored.size
 }
 
-// indexFile parses a JSONL file and upserts its contents into the database.
-func indexFile(db *sql.DB, path string) error {
+// indexStmts holds pre-prepared statements for batch indexing.
+type indexStmts struct {
+	deleteSession *sql.Stmt
+	insertSession *sql.Stmt
+	insertMsg     *sql.Stmt
+	insertTool    *sql.Stmt
+	insertFile    *sql.Stmt
+}
+
+func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
+	var s indexStmts
+	var err error
+
+	s.deleteSession, err = tx.Prepare("DELETE FROM sessions WHERE id = ?")
+	if err != nil {
+		return nil, err
+	}
+	s.insertSession, err = tx.Prepare(`
+		INSERT INTO sessions (id, project_path, project_name, slug, model, git_branch, started_at, updated_at, source_path, source_mtime, source_size)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return nil, err
+	}
+	s.insertMsg, err = tx.Prepare(`
+		INSERT OR IGNORE INTO messages (id, session_id, parent_id, role, content, timestamp, is_compact_summary, input_tokens, output_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return nil, err
+	}
+	s.insertTool, err = tx.Prepare(`
+		INSERT OR IGNORE INTO tool_uses (id, message_id, session_id, tool_name, tool_input_summary)
+		VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return nil, err
+	}
+	s.insertFile, err = tx.Prepare(
+		"INSERT OR REPLACE INTO indexed_files (path, mtime, size) VALUES (?, ?, ?)")
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (s *indexStmts) Close() {
+	s.deleteSession.Close()
+	s.insertSession.Close()
+	s.insertMsg.Close()
+	s.insertTool.Close()
+	s.insertFile.Close()
+}
+
+// indexFile parses a JSONL file and inserts its contents using pre-prepared statements.
+func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -276,12 +455,6 @@ func indexFile(db *sql.DB, path string) error {
 		return err
 	}
 
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
 	var sess sessionMeta
 	var messages []parsedMessage
 	var tools []parsedToolUse
@@ -292,6 +465,11 @@ func indexFile(db *sql.DB, path string) error {
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
+			continue
+		}
+
+		// Fast-skip lines we don't care about before full JSON parse.
+		if !isRelevantLine(line) {
 			continue
 		}
 
@@ -351,17 +529,11 @@ func indexFile(db *sql.DB, path string) error {
 
 	if sess.id == "" {
 		// No session found, but record the file so we skip it next time.
-		_, _ = tx.Exec(
-			"INSERT OR REPLACE INTO indexed_files (path, mtime, size) VALUES (?, ?, ?)",
-			path, mtime, info.Size(),
-		)
-		return tx.Commit()
+		_, _ = stmts.insertFile.Exec(path, mtime, info.Size())
+		return nil
 	}
 
 	// Fallback: derive project from the parent directory name in the file path.
-	// The directory name is an encoded path like -Users-beau-p-myproject.
-	// Since decoding is ambiguous (hyphens in project names), use cwd from
-	// messages when available. This fallback only fires when no message had cwd.
 	if sess.projectPath == "" {
 		dirName := filepath.Base(filepath.Dir(path))
 		sess.projectPath = dirName
@@ -369,11 +541,9 @@ func indexFile(db *sql.DB, path string) error {
 	}
 
 	// Delete existing data for this session (full re-index on change).
-	_, _ = tx.Exec("DELETE FROM sessions WHERE id = ?", sess.id)
+	_, _ = stmts.deleteSession.Exec(sess.id)
 
-	_, err = tx.Exec(`
-		INSERT INTO sessions (id, project_path, project_name, slug, model, git_branch, started_at, updated_at, source_path, source_mtime, source_size)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err = stmts.insertSession.Exec(
 		sess.id, sess.projectPath, sess.projectName, sess.slug, sess.model, sess.gitBranch,
 		sess.startedAt, sess.updatedAt, path, mtime, info.Size(),
 	)
@@ -381,88 +551,33 @@ func indexFile(db *sql.DB, path string) error {
 		return fmt.Errorf("inserting session: %w", err)
 	}
 
-	msgStmt, err := tx.Prepare(`
-		INSERT OR IGNORE INTO messages (id, session_id, parent_id, role, content, timestamp, is_compact_summary, input_tokens, output_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer msgStmt.Close()
-
 	for _, m := range messages {
-		_, err = msgStmt.Exec(m.id, sess.id, m.parentID, m.role, m.content, m.timestamp, m.isCompactSummary, m.inputTokens, m.outputTokens)
+		_, err = stmts.insertMsg.Exec(m.id, sess.id, m.parentID, m.role, m.content, m.timestamp, m.isCompactSummary, m.inputTokens, m.outputTokens)
 		if err != nil {
 			return fmt.Errorf("inserting message: %w", err)
 		}
 	}
 
-	toolStmt, err := tx.Prepare(`
-		INSERT OR IGNORE INTO tool_uses (id, message_id, session_id, tool_name, tool_input_summary)
-		VALUES (?, ?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer toolStmt.Close()
-
 	for _, t := range tools {
-		_, err = toolStmt.Exec(t.id, t.messageID, sess.id, t.toolName, t.inputSummary)
+		_, err = stmts.insertTool.Exec(t.id, t.messageID, sess.id, t.toolName, t.inputSummary)
 		if err != nil {
 			return fmt.Errorf("inserting tool_use: %w", err)
 		}
 	}
 
 	// Record file as indexed.
-	_, err = tx.Exec(
-		"INSERT OR REPLACE INTO indexed_files (path, mtime, size) VALUES (?, ?, ?)",
-		path, mtime, info.Size(),
-	)
-	if err != nil {
-		return fmt.Errorf("recording indexed file: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
+	_, _ = stmts.insertFile.Exec(path, mtime, info.Size())
 	return nil
 }
 
-// embedMessages generates embeddings for messages in a session that don't have them yet.
-func embedMessages(db *sql.DB, embedder *Embedder, sessionID string) {
-	rows, err := db.Query(`
-		SELECT m.rowid, m.content
-		FROM messages m
-		LEFT JOIN messages_vec mv ON mv.message_rowid = m.rowid
-		WHERE m.session_id = ? AND mv.message_rowid IS NULL AND trim(m.content) != ''`,
-		sessionID,
-	)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var rowid int64
-		var content string
-		if err := rows.Scan(&rowid, &content); err != nil {
-			continue
-		}
-
-		vec, err := embedder.Embed(content)
-		if err != nil {
-			continue
-		}
-
-		serialized, err := serializeVec(vec)
-		if err != nil {
-			continue
-		}
-
-		_, _ = db.Exec(
-			"INSERT OR IGNORE INTO messages_vec(embedding, message_rowid) VALUES (?, ?)",
-			serialized, rowid,
-		)
-	}
+// isRelevantLine does a cheap byte scan to check if a JSONL line contains
+// a message type we care about, avoiding a full JSON parse for irrelevant lines.
+func isRelevantLine(line []byte) bool {
+	// We need: "type":"user", "type":"assistant", or any line with "sessionId"
+	// (for metadata extraction from the first message of any type).
+	return bytes.Contains(line, []byte(`"type":"user"`)) ||
+		bytes.Contains(line, []byte(`"type":"assistant"`)) ||
+		bytes.Contains(line, []byte(`"sessionId"`))
 }
 
 type sessionMeta struct {
