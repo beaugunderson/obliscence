@@ -1,0 +1,46 @@
+version: 2
+
+before:
+  hooks:
+    - make setup-lib
+
+builds:
+  - id: obliscence
+    main: .
+    binary: obliscence
+    env:
+      - CGO_ENABLED=1
+      - CGO_LDFLAGS=-L{{.Env.PWD}}/lib -Wl,-no_warn_duplicate_libraries
+      - CGO_CFLAGS=-Wno-deprecated-declarations
+    tags:
+      - sqlite_fts5
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    files:
+      - README.md
+      - LICENSE
+
+brews:
+  - repository:
+      owner: beaugunderson
+      name: homebrew-tap
+    name: obliscence
+    homepage: https://github.com/beaugunderson/obliscence
+    description: Archive and search Claude Code conversations
+    license: MIT
+    install: |
+      bin.install "obliscence"
+    test: |
+      system bin/"obliscence", "stats"
+
+changelog:
+  sort: asc
