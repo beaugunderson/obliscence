@@ -39,6 +39,15 @@ func green(s string) string  { return color(colorGreen, s) }
 func yellow(s string) string { return color(colorYellow, s) }
 func cyan(s string) string   { return color(colorCyan, s) }
 
+// tabBold wraps ANSI codes in \xff delimiters so tabwriter.StripEscape
+// excludes them from column width calculations.
+func tabBold(s string) string {
+	if !isTTY {
+		return s
+	}
+	return "\xff" + colorBold + "\xff" + s + "\xff" + colorReset + "\xff"
+}
+
 // highlightSnippet replaces FTS5 match markers (STX/ETX control chars) with
 // green ANSI coloring for TTY output, or strips them for non-TTY.
 func highlightSnippet(s string) string {
