@@ -4,11 +4,23 @@ Archive and search Claude Code conversations. SQLite + FTS5/BM25 + sqlite-vec se
 
 ## Install
 
+### From source (recommended)
+
 ```
+git clone https://github.com/beaugunderson/obliscence.git
+cd obliscence
 make install
+obliscence setup
 ```
 
-Requires CGo (mattn/go-sqlite3 + daulet/tokenizers). On macOS, Xcode command-line tools are sufficient. The Makefile auto-downloads `libtokenizers.a`.
+### With go install
+
+```
+go install -tags "sqlite_fts5" github.com/beaugunderson/obliscence@latest
+obliscence setup
+```
+
+Requires CGo (mattn/go-sqlite3 + daulet/tokenizers). `go install` needs `libtokenizers.a` in your library path — see the [daulet/tokenizers releases](https://github.com/daulet/tokenizers/releases) for prebuilt binaries. The Makefile handles this automatically.
 
 ## Usage
 
