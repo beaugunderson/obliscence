@@ -110,7 +110,7 @@ Add to `~/.claude/settings.json` for automatic indexing at session end and befor
 
 ## Claude Code skill
 
-Copy `.claude/commands/search-history.md` to `~/.claude/commands/` for Claude to use this tool via `/search-history`.
+Copy `.claude/skills/search-history/` to `~/.claude/skills/` for Claude to use this tool proactively. The skill description teaches Claude to invoke obliscence automatically when you ask about past work, previous sessions, or prior solutions — no need to type `/search-history` explicitly.
 
 ## Database
 
