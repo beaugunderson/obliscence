@@ -1,7 +1,8 @@
 .PHONY: build install clean setup-lib
 
-CGO_LDFLAGS ?= -L$(CURDIR)/lib
-export CGO_LDFLAGS
+CGO_LDFLAGS ?= -L$(CURDIR)/lib -Wl,-no_warn_duplicate_libraries
+CGO_CFLAGS ?= -Wno-deprecated-declarations
+export CGO_LDFLAGS CGO_CFLAGS
 
 build: setup-lib
 	go build -tags "sqlite_fts5" -o obliscence .
