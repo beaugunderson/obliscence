@@ -10,7 +10,7 @@ builds:
     binary: obliscence
     env:
       - CGO_ENABLED=1
-      - CGO_LDFLAGS=-L{{.Env.PWD}}/lib -Wl,-no_warn_duplicate_libraries
+      - CGO_LDFLAGS=-L{{.Env.PROJECT_DIR}}/lib -Wl,-no_warn_duplicate_libraries
       - CGO_CFLAGS=-Wno-deprecated-declarations
     tags:
       - sqlite_fts5
