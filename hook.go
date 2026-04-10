@@ -32,7 +32,7 @@ func (cmd *HookCmd) Run(rc *RunContext) error {
 	// Swallow all errors — hooks must exit 0 silently to avoid
 	// the false "hook error" label bug in Claude Code.
 	if input.TranscriptPath != "" {
-		_ = indexFile(rc.DB, input.TranscriptPath, nil)
+		_ = indexFile(rc.DB, input.TranscriptPath)
 		return nil
 	}
 
@@ -42,7 +42,7 @@ func (cmd *HookCmd) Run(rc *RunContext) error {
 		// Try direct glob match.
 		pattern := filepath.Join(projectsDir, "*", input.SessionID+".jsonl")
 		if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
-			_ = indexFile(rc.DB, matches[0], nil)
+			_ = indexFile(rc.DB, matches[0])
 			return nil
 		}
 
@@ -51,7 +51,7 @@ func (cmd *HookCmd) Run(rc *RunContext) error {
 			encoded := encodePath(input.CWD)
 			path := filepath.Join(projectsDir, encoded, input.SessionID+".jsonl")
 			if _, err := os.Stat(path); err == nil {
-				_ = indexFile(rc.DB, path, nil)
+				_ = indexFile(rc.DB, path)
 				return nil
 			}
 		}

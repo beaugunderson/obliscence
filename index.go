@@ -37,7 +37,7 @@ func (cmd *IndexCmd) Run(rc *RunContext) error {
 	}
 
 	if cmd.Session != "" {
-		return cmd.indexSession(rc, projectsDir, embedder)
+		return cmd.indexSession(rc, projectsDir)
 	}
 	return cmd.indexAll(rc, projectsDir, embedder)
 }
@@ -88,6 +88,7 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 		return nil
 	}
 
+	// Pass 1: Text indexing (fast — makes FTS5 search available immediately).
 	var indexed, errored int
 	showProgress := isTTY && !cmd.Verbose && !rc.JSON
 	start := time.Now()
@@ -96,10 +97,10 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 		if cmd.Verbose {
 			fmt.Fprintf(os.Stderr, "indexing %s\n", path)
 		} else if showProgress {
-			printProgress(i, len(toIndex), start)
+			printProgress("indexing", i, len(toIndex), start)
 		}
 
-		if err := indexFile(rc.DB, path, embedder); err != nil {
+		if err := indexFile(rc.DB, path); err != nil {
 			if cmd.Verbose {
 				fmt.Fprintf(os.Stderr, "error indexing %s: %v\n", path, err)
 			}
@@ -110,39 +111,122 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 	}
 
 	if showProgress {
-		fmt.Fprintf(os.Stderr, "\r\033[K") // Clear progress line.
+		fmt.Fprintf(os.Stderr, "\r\033[K")
 	}
 	if !rc.JSON {
 		fmt.Fprintf(os.Stderr, "indexed %d, skipped %d unchanged, %d errors (%s)\n",
 			indexed, skipped, errored, time.Since(start).Round(time.Millisecond))
 	}
+
+	// Pass 2: Generate embeddings for messages that don't have them yet.
+	if embedder != nil {
+		if err := cmd.embedPass(rc, embedder); err != nil {
+			fmt.Fprintf(os.Stderr, "embedding error: %v\n", err)
+		}
+	}
+
 	return nil
 }
 
-func printProgress(done, total int, start time.Time) {
+func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
+	// Count messages needing embeddings.
+	var total int
+	err := rc.DB.QueryRow(`
+		SELECT COUNT(*)
+		FROM messages m
+		LEFT JOIN messages_vec mv ON mv.message_rowid = m.rowid
+		WHERE mv.message_rowid IS NULL AND trim(m.content) != ''`,
+	).Scan(&total)
+	if err != nil {
+		return err
+	}
+
+	if total == 0 {
+		if !rc.JSON {
+			fmt.Fprintln(os.Stderr, "embeddings up to date")
+		}
+		return nil
+	}
+
+	if !rc.JSON {
+		fmt.Fprintf(os.Stderr, "generating embeddings for %d messages...\n", total)
+	}
+
+	rows, err := rc.DB.Query(`
+		SELECT m.rowid, m.content
+		FROM messages m
+		LEFT JOIN messages_vec mv ON mv.message_rowid = m.rowid
+		WHERE mv.message_rowid IS NULL AND trim(m.content) != ''`,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	showProgress := isTTY && !cmd.Verbose && !rc.JSON
+	start := time.Now()
+	var done int
+
+	for rows.Next() {
+		var rowid int64
+		var content string
+		if err := rows.Scan(&rowid, &content); err != nil {
+			continue
+		}
+
+		vec, err := embedder.Embed(content)
+		if err != nil {
+			continue
+		}
+
+		serialized, err := serializeVec(vec)
+		if err != nil {
+			continue
+		}
+
+		_, _ = rc.DB.Exec(
+			"INSERT OR IGNORE INTO messages_vec(embedding, message_rowid) VALUES (?, ?)",
+			serialized, rowid,
+		)
+
+		done++
+		if showProgress {
+			printProgress("embedding", done, total, start)
+		}
+	}
+
+	if showProgress {
+		fmt.Fprintf(os.Stderr, "\r\033[K")
+	}
+	if !rc.JSON {
+		fmt.Fprintf(os.Stderr, "embedded %d messages (%s)\n",
+			done, time.Since(start).Round(time.Millisecond))
+	}
+	return nil
+}
+
+func printProgress(label string, done, total int, start time.Time) {
 	pct := float64(done) / float64(total)
 	elapsed := time.Since(start)
 
-	// ETA based on average time per file.
 	var eta string
 	if done > 0 {
-		perFile := elapsed / time.Duration(done)
-		remaining := perFile * time.Duration(total-done)
+		perItem := elapsed / time.Duration(done)
+		remaining := perItem * time.Duration(total-done)
 		eta = remaining.Round(time.Second).String()
 	} else {
 		eta = "..."
 	}
 
-	// Bar: 30 chars wide.
 	const barWidth = 30
 	filled := int(pct * barWidth)
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 
-	fmt.Fprintf(os.Stderr, "\r\033[K%s %d/%d (%.0f%%) eta %s",
-		bar, done, total, pct*100, eta)
+	fmt.Fprintf(os.Stderr, "\r\033[K%s %s %d/%d (%.0f%%) eta %s",
+		label, bar, done, total, pct*100, eta)
 }
 
-func (cmd *IndexCmd) indexSession(rc *RunContext, projectsDir string, embedder *Embedder) error {
+func (cmd *IndexCmd) indexSession(rc *RunContext, projectsDir string) error {
 	// Find the JSONL file for this session UUID.
 	pattern := filepath.Join(projectsDir, "*", cmd.Session+".jsonl")
 	matches, err := filepath.Glob(pattern)
@@ -152,7 +236,7 @@ func (cmd *IndexCmd) indexSession(rc *RunContext, projectsDir string, embedder *
 	if len(matches) == 0 {
 		return fmt.Errorf("session %s not found", cmd.Session)
 	}
-	return indexFile(rc.DB, matches[0], embedder)
+	return indexFile(rc.DB, matches[0])
 }
 
 func (cmd *IndexCmd) needsIndexing(db *sql.DB, path string) (bool, error) {
@@ -180,7 +264,7 @@ func (cmd *IndexCmd) needsIndexing(db *sql.DB, path string) (bool, error) {
 }
 
 // indexFile parses a JSONL file and upserts its contents into the database.
-func indexFile(db *sql.DB, path string, embedder *Embedder) error {
+func indexFile(db *sql.DB, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -338,11 +422,6 @@ func indexFile(db *sql.DB, path string, embedder *Embedder) error {
 
 	if err := tx.Commit(); err != nil {
 		return err
-	}
-
-	// Generate embeddings for new messages (after commit so data is safe).
-	if embedder != nil {
-		embedMessages(db, embedder, sess.id)
 	}
 
 	return nil
