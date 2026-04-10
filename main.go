@@ -17,6 +17,7 @@ var cli struct {
 	Resume   ResumeCmd   `cmd:"" help:"Resume a session in Claude Code."`
 	Stats    StatsCmd    `cmd:"" help:"Database statistics."`
 	Projects ProjectsCmd `cmd:"" help:"List projects."`
+	Setup    SetupCmd    `cmd:"" help:"Download ONNX model for semantic search."`
 	Hook     HookCmd     `cmd:"" help:"Handle Claude Code hook invocation." hidden:""`
 }
 

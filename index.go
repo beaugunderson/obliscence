@@ -14,18 +14,34 @@ type IndexCmd struct {
 	Session string `help:"Index a specific session by UUID." short:"s"`
 	Force   bool   `help:"Force full reindex of all sessions." short:"f"`
 	Verbose bool   `help:"Show what's being indexed." short:"v"`
+	NoEmbed bool   `help:"Skip embedding generation." name:"no-embed"`
 }
 
 func (cmd *IndexCmd) Run(rc *RunContext) error {
 	projectsDir := expandPath("~/.claude/projects")
 
-	if cmd.Session != "" {
-		return cmd.indexSession(rc, projectsDir)
+	// Initialize embedder if available and not disabled.
+	var embedder *Embedder
+	if !cmd.NoEmbed {
+		var err error
+		embedder, err = NewEmbedder()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: embedder init failed: %v (continuing without embeddings)\n", err)
+		} else if embedder != nil {
+			defer embedder.Close()
+			if cmd.Verbose {
+				fmt.Fprintln(os.Stderr, "embedding model loaded")
+			}
+		}
 	}
-	return cmd.indexAll(rc, projectsDir)
+
+	if cmd.Session != "" {
+		return cmd.indexSession(rc, projectsDir, embedder)
+	}
+	return cmd.indexAll(rc, projectsDir, embedder)
 }
 
-func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string) error {
+func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embedder) error {
 	if cmd.Force {
 		if _, err := rc.DB.Exec("DELETE FROM indexed_files"); err != nil {
 			return fmt.Errorf("clearing index state: %w", err)
@@ -71,7 +87,7 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string) error {
 				fmt.Fprintf(os.Stderr, "indexing %s\n", path)
 			}
 
-			if err := indexFile(rc.DB, path); err != nil {
+			if err := indexFile(rc.DB, path, embedder); err != nil {
 				if cmd.Verbose {
 					fmt.Fprintf(os.Stderr, "error indexing %s: %v\n", path, err)
 				}
@@ -88,7 +104,7 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string) error {
 	return nil
 }
 
-func (cmd *IndexCmd) indexSession(rc *RunContext, projectsDir string) error {
+func (cmd *IndexCmd) indexSession(rc *RunContext, projectsDir string, embedder *Embedder) error {
 	// Find the JSONL file for this session UUID.
 	pattern := filepath.Join(projectsDir, "*", cmd.Session+".jsonl")
 	matches, err := filepath.Glob(pattern)
@@ -98,7 +114,7 @@ func (cmd *IndexCmd) indexSession(rc *RunContext, projectsDir string) error {
 	if len(matches) == 0 {
 		return fmt.Errorf("session %s not found", cmd.Session)
 	}
-	return indexFile(rc.DB, matches[0])
+	return indexFile(rc.DB, matches[0], embedder)
 }
 
 func (cmd *IndexCmd) needsIndexing(db *sql.DB, path string) (bool, error) {
@@ -126,7 +142,7 @@ func (cmd *IndexCmd) needsIndexing(db *sql.DB, path string) (bool, error) {
 }
 
 // indexFile parses a JSONL file and upserts its contents into the database.
-func indexFile(db *sql.DB, path string) error {
+func indexFile(db *sql.DB, path string, embedder *Embedder) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -282,7 +298,54 @@ func indexFile(db *sql.DB, path string) error {
 		return fmt.Errorf("recording indexed file: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Generate embeddings for new messages (after commit so data is safe).
+	if embedder != nil {
+		embedMessages(db, embedder, sess.id)
+	}
+
+	return nil
+}
+
+// embedMessages generates embeddings for messages in a session that don't have them yet.
+func embedMessages(db *sql.DB, embedder *Embedder, sessionID string) {
+	rows, err := db.Query(`
+		SELECT m.rowid, m.content
+		FROM messages m
+		LEFT JOIN messages_vec mv ON mv.message_rowid = m.rowid
+		WHERE m.session_id = ? AND mv.message_rowid IS NULL AND m.content != ''`,
+		sessionID,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var rowid int64
+		var content string
+		if err := rows.Scan(&rowid, &content); err != nil {
+			continue
+		}
+
+		vec, err := embedder.Embed(content)
+		if err != nil {
+			continue
+		}
+
+		serialized, err := serializeVec(vec)
+		if err != nil {
+			continue
+		}
+
+		_, _ = db.Exec(
+			"INSERT OR IGNORE INTO messages_vec(embedding, message_rowid) VALUES (?, ?)",
+			serialized, rowid,
+		)
+	}
 }
 
 type sessionMeta struct {
