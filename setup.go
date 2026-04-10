@@ -87,8 +87,13 @@ func (cmd *SetupCmd) downloadModel() error {
 		}
 	}
 
-	url := "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"
-	fmt.Fprintln(os.Stderr, "downloading all-MiniLM-L6-v2 ONNX model...")
+	// Use quantized ARM64 model when available — ~4x smaller, ~2x faster inference.
+	modelFile := "model.onnx"
+	if runtime.GOARCH == "arm64" {
+		modelFile = "model_qint8_arm64.onnx"
+	}
+	url := "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/" + modelFile
+	fmt.Fprintf(os.Stderr, "downloading all-MiniLM-L6-v2 ONNX model (%s)...\n", modelFile)
 
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err

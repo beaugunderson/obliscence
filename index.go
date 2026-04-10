@@ -112,6 +112,12 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 		if !rc.JSON {
 			fmt.Fprintf(os.Stderr, "nothing to index (%d files unchanged)\n", skipped)
 		}
+		// Still run embedding pass — there may be un-embedded messages from a prior --no-embed run.
+		if embedder != nil {
+			if err := cmd.embedPass(rc, embedder); err != nil {
+				fmt.Fprintf(os.Stderr, "embedding error: %v\n", err)
+			}
+		}
 		return nil
 	}
 
@@ -203,7 +209,7 @@ func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
 		SELECT COUNT(*)
 		FROM messages m
 		LEFT JOIN messages_vec mv ON mv.message_rowid = m.rowid
-		WHERE mv.message_rowid IS NULL AND trim(m.content) != ''`,
+		WHERE mv.message_rowid IS NULL AND length(trim(m.content)) >= 20`,
 	).Scan(&total)
 	if err != nil {
 		return err
@@ -224,7 +230,7 @@ func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
 		SELECT m.rowid, m.content
 		FROM messages m
 		LEFT JOIN messages_vec mv ON mv.message_rowid = m.rowid
-		WHERE mv.message_rowid IS NULL AND trim(m.content) != ''`,
+		WHERE mv.message_rowid IS NULL AND length(trim(m.content)) >= 20`,
 	)
 	if err != nil {
 		return err
