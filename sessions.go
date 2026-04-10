@@ -78,9 +78,8 @@ func (cmd *SessionsCmd) Run(rc *RunContext) error {
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', tabwriter.StripEscape)
-	fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-		tabBold("PROJECT"), tabBold("SLUG"), tabBold("BRANCH"), tabBold("UPDATED"), tabBold("MSGS"))
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "PROJECT\tSLUG\tBRANCH\tUPDATED\tMSGS\n")
 
 	for _, s := range sessions {
 		updated := s.UpdatedAt
@@ -247,8 +246,8 @@ func (cmd *ProjectsCmd) Run(rc *RunContext) error {
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', tabwriter.StripEscape)
-	fmt.Fprintf(w, "%s\t%s\t%s\n", tabBold("PROJECT"), tabBold("SESSIONS"), tabBold("LAST UPDATED"))
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "PROJECT\tSESSIONS\tLAST UPDATED\n")
 	for _, p := range projects {
 		updated := p.LastUpdated
 		if len(updated) > 10 {
