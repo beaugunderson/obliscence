@@ -14,6 +14,7 @@ var cli struct {
 	Search   SearchCmd   `cmd:"" help:"Search conversations."`
 	Sessions SessionsCmd `cmd:"" help:"List sessions."`
 	Show     ShowCmd     `cmd:"" help:"Show a session conversation."`
+	Resume   ResumeCmd   `cmd:"" help:"Resume a session in Claude Code."`
 	Stats    StatsCmd    `cmd:"" help:"Database statistics."`
 	Projects ProjectsCmd `cmd:"" help:"List projects."`
 	Hook     HookCmd     `cmd:"" help:"Handle Claude Code hook invocation." hidden:""`

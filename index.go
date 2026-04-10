@@ -12,6 +12,7 @@ import (
 
 type IndexCmd struct {
 	Session string `help:"Index a specific session by UUID." short:"s"`
+	Force   bool   `help:"Force full reindex of all sessions." short:"f"`
 	Verbose bool   `help:"Show what's being indexed." short:"v"`
 }
 
@@ -25,6 +26,15 @@ func (cmd *IndexCmd) Run(rc *RunContext) error {
 }
 
 func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string) error {
+	if cmd.Force {
+		if _, err := rc.DB.Exec("DELETE FROM indexed_files"); err != nil {
+			return fmt.Errorf("clearing index state: %w", err)
+		}
+		if cmd.Verbose {
+			fmt.Fprintln(os.Stderr, "cleared index state, forcing full reindex")
+		}
+	}
+
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		return fmt.Errorf("reading projects dir: %w", err)
@@ -161,8 +171,7 @@ func indexFile(db *sql.DB, path string) error {
 		// Fill in cwd from later messages if the first one didn't have it.
 		if sess.projectPath == "" {
 			if cwd := unquote(raw["cwd"]); cwd != "" {
-				sess.projectPath = cwd
-				sess.projectName = filepath.Base(cwd)
+				sess.projectPath, sess.projectName = resolveProject(cwd)
 			}
 		}
 		// Update slug/branch from later messages if present.
@@ -314,12 +323,27 @@ func extractSessionMeta(sess *sessionMeta, raw map[string]json.RawMessage) {
 
 	cwd := unquote(raw["cwd"])
 	if cwd != "" {
-		sess.projectPath = cwd
-		sess.projectName = filepath.Base(cwd)
+		sess.projectPath, sess.projectName = resolveProject(cwd)
 	}
 
 	sess.slug = unquote(raw["slug"])
 	sess.gitBranch = unquote(raw["gitBranch"])
+}
+
+// resolveProject returns (projectPath, projectName) for a cwd, handling
+// Claude Code worktree directories like .claude/worktrees/<slug> by resolving
+// to the parent project.
+func resolveProject(cwd string) (string, string) {
+	// Detect .claude/worktrees/<name> pattern and resolve to parent project.
+	parts := strings.Split(filepath.ToSlash(cwd), "/")
+	for i := len(parts) - 2; i >= 1; i-- {
+		if parts[i] == "worktrees" && i >= 1 && parts[i-1] == ".claude" {
+			// The project root is everything before .claude/
+			projectPath := strings.Join(parts[:i-1], "/")
+			return projectPath, filepath.Base(projectPath)
+		}
+	}
+	return cwd, filepath.Base(cwd)
 }
 
 func parseUserMessage(raw map[string]json.RawMessage) *parsedMessage {

@@ -39,6 +39,19 @@ func green(s string) string  { return color(colorGreen, s) }
 func yellow(s string) string { return color(colorYellow, s) }
 func cyan(s string) string   { return color(colorCyan, s) }
 
+// highlightSnippet replaces FTS5 match markers (STX/ETX control chars) with
+// green ANSI coloring for TTY output, or strips them for non-TTY.
+func highlightSnippet(s string) string {
+	if isTTY {
+		s = strings.ReplaceAll(s, "\x02", colorGreen+colorBold)
+		s = strings.ReplaceAll(s, "\x03", colorReset)
+	} else {
+		s = strings.ReplaceAll(s, "\x02", "")
+		s = strings.ReplaceAll(s, "\x03", "")
+	}
+	return s
+}
+
 // printJSON marshals v to stdout as indented JSON.
 func printJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)

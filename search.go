@@ -58,7 +58,7 @@ func (cmd *SearchCmd) Run(rc *RunContext) error {
 			s.project_name,
 			m.role,
 			m.timestamp,
-			snippet(messages_fts, 0, '[', ']', '...', 32) as snip,
+			snippet(messages_fts, 0, char(2), char(3), '...', 32) as snip,
 			bm25(messages_fts) as score,
 			s.git_branch
 		FROM messages_fts
@@ -99,6 +99,9 @@ func (cmd *SearchCmd) Run(rc *RunContext) error {
 	}
 
 	if rc.JSON {
+		for i := range results {
+			results[i].Snippet = strings.NewReplacer("\x02", "", "\x03", "").Replace(results[i].Snippet)
+		}
 		return printJSON(results)
 	}
 
@@ -114,7 +117,7 @@ func (cmd *SearchCmd) Run(rc *RunContext) error {
 			cyan(r.Role),
 			dim(r.Timestamp[:min(len(r.Timestamp), 10)]),
 		)
-		fmt.Printf("  %s\n\n", r.Snippet)
+		fmt.Printf("  %s\n\n", highlightSnippet(r.Snippet))
 	}
 
 	return nil
