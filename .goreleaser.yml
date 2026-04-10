@@ -33,6 +33,7 @@ brews:
   - repository:
       owner: beaugunderson
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     name: obliscence
     homepage: https://github.com/beaugunderson/obliscence
     description: Archive and search Claude Code conversations
