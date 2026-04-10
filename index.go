@@ -316,7 +316,7 @@ func embedMessages(db *sql.DB, embedder *Embedder, sessionID string) {
 		SELECT m.rowid, m.content
 		FROM messages m
 		LEFT JOIN messages_vec mv ON mv.message_rowid = m.rowid
-		WHERE m.session_id = ? AND mv.message_rowid IS NULL AND m.content != ''`,
+		WHERE m.session_id = ? AND mv.message_rowid IS NULL AND trim(m.content) != ''`,
 		sessionID,
 	)
 	if err != nil {

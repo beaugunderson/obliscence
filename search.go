@@ -285,7 +285,7 @@ func (cmd *SearchCmd) semanticResults(rc *RunContext, queryVec []float32, limit 
 	rows, err := rc.DB.Query(`
 		SELECT
 			m.id, m.session_id, s.slug, s.project_name, m.role, m.timestamp,
-			substr(m.content, 1, 200) as snip,
+			substr(m.content, 1, 500) as snip,
 			knn.distance as score, s.git_branch
 		FROM (
 			SELECT rowid, distance
@@ -315,6 +315,10 @@ func scanResults(rows *sql.Rows) ([]SearchResult, error) {
 		)
 		if err != nil {
 			return nil, err
+		}
+		r.Snippet = truncate(strings.TrimSpace(r.Snippet), 200)
+		if r.Snippet == "" {
+			continue // Skip messages with no text content.
 		}
 		results = append(results, r)
 	}
