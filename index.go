@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type IndexCmd struct {
@@ -56,52 +57,89 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 		return fmt.Errorf("reading projects dir: %w", err)
 	}
 
-	var indexed, skipped, errored int
-
+	// Collect all JSONL files and partition into needs-indexing vs skip.
+	var toIndex, allFiles []string
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-
 		dirPath := filepath.Join(projectsDir, entry.Name())
 		jsonlFiles, err := filepath.Glob(filepath.Join(dirPath, "*.jsonl"))
 		if err != nil {
 			continue
 		}
-
 		for _, path := range jsonlFiles {
+			allFiles = append(allFiles, path)
 			changed, err := cmd.needsIndexing(rc.DB, path)
 			if err != nil {
-				if cmd.Verbose {
-					fmt.Fprintf(os.Stderr, "error checking %s: %v\n", path, err)
-				}
-				errored++
 				continue
 			}
-			if !changed {
-				skipped++
-				continue
+			if changed {
+				toIndex = append(toIndex, path)
 			}
-
-			if cmd.Verbose {
-				fmt.Fprintf(os.Stderr, "indexing %s\n", path)
-			}
-
-			if err := indexFile(rc.DB, path, embedder); err != nil {
-				if cmd.Verbose {
-					fmt.Fprintf(os.Stderr, "error indexing %s: %v\n", path, err)
-				}
-				errored++
-				continue
-			}
-			indexed++
 		}
 	}
 
-	if cmd.Verbose || !rc.JSON {
-		fmt.Fprintf(os.Stderr, "indexed %d, skipped %d unchanged, %d errors\n", indexed, skipped, errored)
+	skipped := len(allFiles) - len(toIndex)
+	if len(toIndex) == 0 {
+		if !rc.JSON {
+			fmt.Fprintf(os.Stderr, "nothing to index (%d files unchanged)\n", skipped)
+		}
+		return nil
+	}
+
+	var indexed, errored int
+	showProgress := isTTY && !cmd.Verbose && !rc.JSON
+	start := time.Now()
+
+	for i, path := range toIndex {
+		if cmd.Verbose {
+			fmt.Fprintf(os.Stderr, "indexing %s\n", path)
+		} else if showProgress {
+			printProgress(i, len(toIndex), start)
+		}
+
+		if err := indexFile(rc.DB, path, embedder); err != nil {
+			if cmd.Verbose {
+				fmt.Fprintf(os.Stderr, "error indexing %s: %v\n", path, err)
+			}
+			errored++
+			continue
+		}
+		indexed++
+	}
+
+	if showProgress {
+		fmt.Fprintf(os.Stderr, "\r\033[K") // Clear progress line.
+	}
+	if !rc.JSON {
+		fmt.Fprintf(os.Stderr, "indexed %d, skipped %d unchanged, %d errors (%s)\n",
+			indexed, skipped, errored, time.Since(start).Round(time.Millisecond))
 	}
 	return nil
+}
+
+func printProgress(done, total int, start time.Time) {
+	pct := float64(done) / float64(total)
+	elapsed := time.Since(start)
+
+	// ETA based on average time per file.
+	var eta string
+	if done > 0 {
+		perFile := elapsed / time.Duration(done)
+		remaining := perFile * time.Duration(total-done)
+		eta = remaining.Round(time.Second).String()
+	} else {
+		eta = "..."
+	}
+
+	// Bar: 30 chars wide.
+	const barWidth = 30
+	filled := int(pct * barWidth)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+
+	fmt.Fprintf(os.Stderr, "\r\033[K%s %d/%d (%.0f%%) eta %s",
+		bar, done, total, pct*100, eta)
 }
 
 func (cmd *IndexCmd) indexSession(rc *RunContext, projectsDir string, embedder *Embedder) error {
