@@ -36,8 +36,26 @@ func openDB(path string) (*sql.DB, error) {
 }
 
 func initSchema(db *sql.DB) error {
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	// One-time backfill: populate embedded_messages from messages_vec rows that
+	// still correspond to existing messages. Stale entries in messages_vec (from
+	// re-indexed sessions whose old embeddings were never cleaned up) are pruned.
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM embedded_messages").Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		// Prune stale embeddings whose messages no longer exist.
+		db.Exec(`DELETE FROM messages_vec WHERE message_rowid NOT IN (SELECT rowid FROM messages)`)
+		_, err := db.Exec(`
+			INSERT OR IGNORE INTO embedded_messages(message_rowid)
+			SELECT mv.message_rowid FROM messages_vec mv
+			WHERE mv.message_rowid IN (SELECT rowid FROM messages)`)
+		return err
+	}
+	return nil
 }
 
 const schema = `
@@ -107,6 +125,11 @@ CREATE INDEX IF NOT EXISTS idx_tool_uses_session ON tool_uses(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_uses_name ON tool_uses(tool_name);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_name);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
+
+-- Track which messages have embeddings (avoids slow LEFT JOIN on vec0 virtual table).
+CREATE TABLE IF NOT EXISTS embedded_messages (
+    message_rowid INTEGER PRIMARY KEY
+);
 
 -- Track all scanned files so we skip empty/unparseable ones on re-index.
 CREATE TABLE IF NOT EXISTS indexed_files (

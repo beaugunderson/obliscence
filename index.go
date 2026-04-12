@@ -208,12 +208,14 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 
 func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
 	// Count messages needing embeddings.
+	// Use embedded_messages tracking table instead of LEFT JOIN on vec0 virtual table
+	// (vec0 JOINs are extremely slow).
 	var total int
 	err := rc.DB.QueryRow(`
 		SELECT COUNT(*)
 		FROM messages m
-		LEFT JOIN messages_vec mv ON mv.message_rowid = m.rowid
-		WHERE mv.message_rowid IS NULL AND length(trim(m.content)) >= 20`,
+		WHERE m.rowid NOT IN (SELECT message_rowid FROM embedded_messages)
+		  AND length(trim(m.content)) >= 20`,
 	).Scan(&total)
 	if err != nil {
 		return err
@@ -233,8 +235,8 @@ func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
 	rows, err := rc.DB.Query(`
 		SELECT m.rowid, m.content
 		FROM messages m
-		LEFT JOIN messages_vec mv ON mv.message_rowid = m.rowid
-		WHERE mv.message_rowid IS NULL AND length(trim(m.content)) >= 20`,
+		WHERE m.rowid NOT IN (SELECT message_rowid FROM embedded_messages)
+		  AND length(trim(m.content)) >= 20`,
 	)
 	if err != nil {
 		return err
@@ -274,9 +276,16 @@ func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
 			return err
 		}
 
-		stmt, err := tx.Prepare(
+		vecStmt, err := tx.Prepare(
 			"INSERT OR IGNORE INTO messages_vec(embedding, message_rowid) VALUES (?, ?)")
 		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		trackStmt, err := tx.Prepare(
+			"INSERT OR IGNORE INTO embedded_messages(message_rowid) VALUES (?)")
+		if err != nil {
+			vecStmt.Close()
 			tx.Rollback()
 			return err
 		}
@@ -290,14 +299,16 @@ func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
 			if err != nil {
 				continue
 			}
-			_, _ = stmt.Exec(serialized, item.rowid)
+			_, _ = vecStmt.Exec(serialized, item.rowid)
+			_, _ = trackStmt.Exec(item.rowid)
 			done++
 			if showProgress {
 				printProgress("embedding", done, total, start)
 			}
 		}
 
-		stmt.Close()
+		vecStmt.Close()
+		trackStmt.Close()
 		if err := tx.Commit(); err != nil {
 			return err
 		}
@@ -403,17 +414,31 @@ func needsIndexing(indexed map[string]fileState, path string) bool {
 
 // indexStmts holds pre-prepared statements for batch indexing.
 type indexStmts struct {
-	deleteSession *sql.Stmt
-	insertSession *sql.Stmt
-	insertMsg     *sql.Stmt
-	insertTool    *sql.Stmt
-	insertFile    *sql.Stmt
+	deleteVec        *sql.Stmt
+	deleteEmbeddings *sql.Stmt
+	deleteSession    *sql.Stmt
+	insertSession    *sql.Stmt
+	insertMsg        *sql.Stmt
+	insertTool       *sql.Stmt
+	insertFile       *sql.Stmt
 }
 
 func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 	var s indexStmts
 	var err error
 
+	s.deleteVec, err = tx.Prepare(
+		"DELETE FROM messages_vec WHERE message_rowid IN (SELECT rowid FROM messages WHERE session_id = ?)",
+	)
+	if err != nil {
+		return nil, err
+	}
+	s.deleteEmbeddings, err = tx.Prepare(
+		"DELETE FROM embedded_messages WHERE message_rowid IN (SELECT rowid FROM messages WHERE session_id = ?)",
+	)
+	if err != nil {
+		return nil, err
+	}
 	s.deleteSession, err = tx.Prepare("DELETE FROM sessions WHERE id = ?")
 	if err != nil {
 		return nil, err
@@ -445,6 +470,8 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 }
 
 func (s *indexStmts) Close() {
+	s.deleteVec.Close()
+	s.deleteEmbeddings.Close()
 	s.deleteSession.Close()
 	s.insertSession.Close()
 	s.insertMsg.Close()
@@ -551,6 +578,9 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 	}
 
 	// Delete existing data for this session (full re-index on change).
+	// Clean up vec table + tracking before cascade deletes messages.
+	_, _ = stmts.deleteVec.Exec(sess.id)
+	_, _ = stmts.deleteEmbeddings.Exec(sess.id)
 	_, _ = stmts.deleteSession.Exec(sess.id)
 
 	_, err = stmts.insertSession.Exec(
