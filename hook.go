@@ -12,6 +12,7 @@ import (
 type HookCmd struct{}
 
 type hookInput struct {
+	HookEventName  string `json:"hook_event_name"`
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
 	CWD            string `json:"cwd"`
@@ -26,6 +27,16 @@ func (cmd *HookCmd) Run(rc *RunContext) error {
 
 	var input hookInput
 	if err := json.Unmarshal(data, &input); err != nil {
+		return nil
+	}
+
+	// SessionStart: full incremental scan to catch sessions that ended
+	// without firing SessionEnd (terminal close, kill, etc). Runs async so
+	// embedding cost stays off the critical path.
+	if input.HookEventName == "SessionStart" {
+		rc.JSON = true // suppress progress + summary output
+		ic := &IndexCmd{}
+		_ = ic.Run(rc)
 		return nil
 	}
 

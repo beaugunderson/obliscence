@@ -60,7 +60,7 @@ func (cmd *UninstallCmd) removeHooks() {
 	}
 
 	changed := false
-	for _, event := range []string{"SessionEnd", "PreCompact"} {
+	for _, event := range []string{"SessionStart", "SessionEnd", "PreCompact"} {
 		existing, ok := hooks[event]
 		if !ok {
 			continue
@@ -176,7 +176,7 @@ func (cmd *SetupCmd) Run(rc *RunContext) error {
 	return nil
 }
 
-// installHooks adds SessionEnd and PreCompact hooks to ~/.claude/settings.json.
+// installHooks adds SessionStart, SessionEnd, and PreCompact hooks to ~/.claude/settings.json.
 func (cmd *SetupCmd) installHooks() {
 	settingsPath := expandPath("~/.claude/settings.json")
 
@@ -204,7 +204,7 @@ func (cmd *SetupCmd) installHooks() {
 	)
 
 	changed := false
-	for _, event := range []string{"SessionEnd", "PreCompact"} {
+	for _, event := range []string{"SessionStart", "SessionEnd", "PreCompact"} {
 		existing, _ := hooks[event]
 		if existing != nil && strings.Contains(string(existing), "obliscence hook") {
 			continue

@@ -68,9 +68,10 @@ obliscence search "terraform" --json | jq '.[].snippet'
 
 1. Downloads ONNX Runtime + all-MiniLM-L6-v2 model (~55MB total) for semantic search
 2. Installs Claude Code hooks in `~/.claude/settings.json`:
-   - `SessionEnd` — indexes the conversation when a session ends
+   - `SessionStart` — runs a full incremental scan (with embeddings) to catch any sessions that ended without firing `SessionEnd` (terminal closed, process killed, etc.)
+   - `SessionEnd` — indexes the conversation when a session ends cleanly
    - `PreCompact` — indexes before context compaction so no messages are lost
-   - Both run `obliscence hook` asynchronously with suppressed output
+   - All run `obliscence hook` asynchronously with suppressed output
 3. Installs the `/search-history` skill so Claude uses obliscence proactively
 
 All inference runs locally — no API calls, no server process.
