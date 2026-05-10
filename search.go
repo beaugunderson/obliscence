@@ -14,13 +14,13 @@ type SearchCmd struct {
 	Limit    int    `       help:"Max results."                                short:"l" default:"20"`
 	After    string `       help:"Only results after this date (YYYY-MM-DD)."  short:"a"`
 	Before   string `       help:"Only results before this date (YYYY-MM-DD)." short:"b"`
-	Semantic bool   `       help:"Use semantic (vector) search."                                      name:"semantic"`
-	Hybrid   bool   `       help:"Combine FTS5 and semantic search."                                  name:"hybrid"`
+	Semantic bool   `       help:"Use semantic (vector) search."                                             name:"semantic"`
+	Hybrid   bool   `       help:"Combine FTS5 and semantic search."                                         name:"hybrid"`
+	Sort     string `       help:"Sort order: relevance (default) or recent."            default:"relevance"                 enum:"relevance,recent"`
 }
 
 type SearchResult struct {
 	SessionID string  `json:"session_id"`
-	Slug      string  `json:"slug"`
 	Project   string  `json:"project"`
 	Role      string  `json:"role"`
 	Timestamp string  `json:"timestamp"`
@@ -65,11 +65,14 @@ func (cmd *SearchCmd) runFTS(rc *RunContext) error {
 		args = append(args, cmd.Before)
 	}
 
+	orderBy := "score"
+	if cmd.Sort == "recent" {
+		orderBy = "m.timestamp DESC"
+	}
 	query := fmt.Sprintf(`
 		SELECT
 			m.id,
 			m.session_id,
-			s.slug,
 			s.project_name,
 			m.role,
 			m.timestamp,
@@ -80,9 +83,10 @@ func (cmd *SearchCmd) runFTS(rc *RunContext) error {
 		JOIN messages m ON m.rowid = messages_fts.rowid
 		JOIN sessions s ON s.id = m.session_id
 		WHERE %s
-		ORDER BY score
+		ORDER BY %s
 		LIMIT ?`,
 		strings.Join(where, " AND "),
+		orderBy,
 	)
 	args = append(args, cmd.Limit)
 
@@ -111,13 +115,22 @@ func (cmd *SearchCmd) runSemantic(rc *RunContext) error {
 		return fmt.Errorf("embedding query: %w", err)
 	}
 
-	results, err := cmd.semanticResults(rc, queryVec, cmd.Limit*3)
+	pool := cmd.Limit * 3
+	if cmd.Sort == "recent" {
+		pool = cmd.Limit * 10
+	}
+	results, err := cmd.semanticResults(rc, queryVec, pool)
 	if err != nil {
 		return fmt.Errorf("semantic search: %w", err)
 	}
 
 	// Post-filter results.
 	results = cmd.filterResults(results)
+	if cmd.Sort == "recent" {
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].Timestamp > results[j].Timestamp
+		})
+	}
 	if len(results) > cmd.Limit {
 		results = results[:cmd.Limit]
 	}
@@ -211,15 +224,28 @@ func (cmd *SearchCmd) runHybrid(rc *RunContext) error {
 		return ranked[i].score > ranked[j].score
 	})
 
-	// Collect top results.
+	// Collect top results. When sorting by recency, take a larger pool from
+	// the RRF ranking, then re-sort by timestamp before trimming.
+	take := cmd.Limit
+	if cmd.Sort == "recent" {
+		take = cmd.Limit * 5
+	}
 	var results []SearchResult
 	for i, s := range ranked {
-		if i >= cmd.Limit {
+		if i >= take {
 			break
 		}
 		r := resultMap[s.id]
 		r.Score = s.score
 		results = append(results, r)
+	}
+	if cmd.Sort == "recent" {
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].Timestamp > results[j].Timestamp
+		})
+		if len(results) > cmd.Limit {
+			results = results[:cmd.Limit]
+		}
 	}
 
 	return cmd.printResults(rc, results)
@@ -250,18 +276,23 @@ func (cmd *SearchCmd) ftsResults(rc *RunContext) ([]SearchResult, error) {
 		args = append(args, cmd.Before)
 	}
 
+	orderBy := "score"
+	if cmd.Sort == "recent" {
+		orderBy = "m.timestamp DESC"
+	}
 	query := fmt.Sprintf(`
 		SELECT
-			m.id, m.session_id, s.slug, s.project_name, m.role, m.timestamp,
+			m.id, m.session_id, s.project_name, m.role, m.timestamp,
 			snippet(messages_fts, 0, char(2), char(3), '...', 32) as snip,
 			bm25(messages_fts) as score, s.git_branch
 		FROM messages_fts
 		JOIN messages m ON m.rowid = messages_fts.rowid
 		JOIN sessions s ON s.id = m.session_id
 		WHERE %s
-		ORDER BY score
+		ORDER BY %s
 		LIMIT ?`,
 		strings.Join(where, " AND "),
+		orderBy,
 	)
 	args = append(args, cmd.Limit)
 
@@ -289,7 +320,7 @@ func (cmd *SearchCmd) semanticResults(
 	// Join with messages/sessions after the KNN lookup.
 	rows, err := rc.DB.Query(`
 		SELECT
-			m.id, m.session_id, s.slug, s.project_name, m.role, m.timestamp,
+			m.id, m.session_id, s.project_name, m.role, m.timestamp,
 			substr(m.content, 1, 500) as snip,
 			knn.distance as score, s.git_branch
 		FROM (
@@ -315,7 +346,7 @@ func scanResults(rows *sql.Rows) ([]SearchResult, error) {
 	for rows.Next() {
 		var r SearchResult
 		err := rows.Scan(
-			&r.MessageID, &r.SessionID, &r.Slug, &r.Project,
+			&r.MessageID, &r.SessionID, &r.Project,
 			&r.Role, &r.Timestamp, &r.Snippet, &r.Score, &r.GitBranch,
 		)
 		if err != nil {
@@ -352,14 +383,84 @@ func (cmd *SearchCmd) printResults(rc *RunContext, results []SearchResult) error
 		return nil
 	}
 
+	// Group by project, then by session UUID, preserving the original
+	// (score-sorted) order at every level via first-appearance.
+	type sessionGroup struct {
+		id   string
+		hits []SearchResult
+	}
+	type projectGroup struct {
+		name     string
+		sessions []*sessionGroup
+		index    map[string]*sessionGroup
+	}
+	var projects []*projectGroup
+	projectIdx := make(map[string]*projectGroup)
 	for _, r := range results {
-		fmt.Printf("%s %s %s %s\n",
-			bold(r.Project),
-			dim(r.Slug),
-			cyan(r.Role),
-			dim(r.Timestamp[:min(len(r.Timestamp), 10)]),
-		)
-		fmt.Printf("  %s\n\n", highlightSnippet(r.Snippet))
+		pg, ok := projectIdx[r.Project]
+		if !ok {
+			pg = &projectGroup{name: r.Project, index: map[string]*sessionGroup{}}
+			projectIdx[r.Project] = pg
+			projects = append(projects, pg)
+		}
+		sg, ok := pg.index[r.SessionID]
+		if !ok {
+			sg = &sessionGroup{id: r.SessionID}
+			pg.index[r.SessionID] = sg
+			pg.sessions = append(pg.sessions, sg)
+		}
+		sg.hits = append(sg.hits, r)
+	}
+
+	// Within each session, order hits by timestamp ascending; order sessions
+	// within a project by their earliest hit's timestamp; order projects by
+	// their most recent hit (recency-first).
+	for _, pg := range projects {
+		for _, sg := range pg.sessions {
+			sort.Slice(sg.hits, func(i, j int) bool {
+				return sg.hits[i].Timestamp < sg.hits[j].Timestamp
+			})
+		}
+		sort.SliceStable(pg.sessions, func(i, j int) bool {
+			return pg.sessions[i].hits[0].Timestamp < pg.sessions[j].hits[0].Timestamp
+		})
+	}
+	latest := func(pg *projectGroup) string {
+		var ts string
+		for _, sg := range pg.sessions {
+			last := sg.hits[len(sg.hits)-1].Timestamp
+			if last > ts {
+				ts = last
+			}
+		}
+		return ts
+	}
+	sort.SliceStable(projects, func(i, j int) bool {
+		return latest(projects[i]) > latest(projects[j])
+	})
+
+	for i, pg := range projects {
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Println(bold(pg.name))
+		for j, sg := range pg.sessions {
+			if j > 0 {
+				fmt.Println()
+			}
+			fmt.Printf("  %s\n", dim(sg.id))
+			for _, r := range sg.hits {
+				ts := r.Timestamp
+				if len(ts) >= 19 {
+					ts = ts[:10] + " " + ts[11:19]
+				}
+				fmt.Printf("    %s %s  %s\n",
+					cyan(fmt.Sprintf("%-9s", r.Role)),
+					dim(ts),
+					highlightSnippet(r.Snippet),
+				)
+			}
+		}
 	}
 
 	return nil

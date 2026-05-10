@@ -32,8 +32,8 @@ obliscence search "query"     # Full-text search (BM25)
 obliscence search --semantic  # Vector similarity search
 obliscence search --hybrid    # FTS5 + semantic via reciprocal rank fusion
 obliscence sessions           # List recent sessions
-obliscence show <slug-or-id>  # Display a conversation
-obliscence resume <slug>      # Resume a session in Claude Code
+obliscence show <session-id>  # Display a conversation (full UUID or unique prefix)
+obliscence resume <session-id> # Resume a session in Claude Code
 obliscence projects           # List all projects
 obliscence stats              # Database statistics
 ```
@@ -48,6 +48,7 @@ obliscence stats              # Database statistics
 --before, -b    Results before date (YYYY-MM-DD)
 --semantic      Vector similarity search (requires setup)
 --hybrid        FTS5 + semantic via reciprocal rank fusion
+--sort          relevance (default) or recent
 --json          Machine-readable output
 ```
 
@@ -57,8 +58,9 @@ obliscence stats              # Database statistics
 obliscence search "authentication" --project canvas-plugins --role assistant
 obliscence search "how to fix flaky tests" --semantic
 obliscence search "database migration" --hybrid
+obliscence search "chronius" --sort=recent
 obliscence sessions --project hyperscribe --limit 10
-obliscence show warm-wondering-quill
+obliscence show 8a95221a
 obliscence search "terraform" --json | jq '.[].snippet'
 ```
 

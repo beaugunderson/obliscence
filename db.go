@@ -63,7 +63,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     project_path TEXT NOT NULL,
     project_name TEXT NOT NULL,
-    slug TEXT,
     model TEXT,
     git_branch TEXT,
     started_at TEXT,

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,28 +9,20 @@ import (
 )
 
 type ResumeCmd struct {
-	Session string `arg:"" help:"Session slug, partial slug, or UUID."`
+	Session string `arg:"" help:"Session UUID (full or unique prefix)."`
 }
 
 func (cmd *ResumeCmd) Run(rc *RunContext) error {
-	var sessionID, projectPath, sourcePath, slug string
-
-	// Try exact match on ID or slug first.
-	err := rc.DB.QueryRow(
-		"SELECT id, project_path, source_path, slug FROM sessions WHERE id = ? OR slug = ?",
-		cmd.Session, cmd.Session,
-	).Scan(&sessionID, &projectPath, &sourcePath, &slug)
-
-	if err == sql.ErrNoRows {
-		// Try partial slug match.
-		err = rc.DB.QueryRow(
-			"SELECT id, project_path, source_path, slug FROM sessions WHERE slug LIKE ?",
-			"%"+cmd.Session+"%",
-		).Scan(&sessionID, &projectPath, &sourcePath, &slug)
+	sessionID, err := resolveSessionID(rc, cmd.Session)
+	if err != nil {
+		return err
 	}
-	if err == sql.ErrNoRows {
-		return fmt.Errorf("no session matching %q", cmd.Session)
-	}
+
+	var projectPath, sourcePath string
+	err = rc.DB.QueryRow(
+		"SELECT project_path, source_path FROM sessions WHERE id = ?",
+		sessionID,
+	).Scan(&projectPath, &sourcePath)
 	if err != nil {
 		return err
 	}
@@ -54,7 +45,7 @@ func (cmd *ResumeCmd) Run(rc *RunContext) error {
 		return fmt.Errorf(
 			"session %s was created in a worktree that no longer exists\n"+
 				"  use `obliscence show %s` to view the conversation instead",
-			slug, slug,
+			sessionID, sessionID,
 		)
 	}
 
@@ -63,7 +54,7 @@ func (cmd *ResumeCmd) Run(rc *RunContext) error {
 		return fmt.Errorf("claude not found in PATH")
 	}
 
-	fmt.Fprintf(os.Stderr, "resuming %s in %s\n", dim(slug), bold(filepath.Base(projectPath)))
+	fmt.Fprintf(os.Stderr, "resuming %s in %s\n", dim(sessionID), bold(filepath.Base(projectPath)))
 
 	c := exec.Command(claudePath, "--resume", sessionID)
 	c.Dir = projectPath

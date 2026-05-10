@@ -273,14 +273,18 @@ obliscence search "$QUERY" --hybrid --role user --json
 # Filter by date range
 obliscence search "$QUERY" --hybrid --after 2026-01-01 --before 2026-04-01 --json
 
+# Sort by recency instead of relevance — use for "last time I mentioned X" queries
+# where the user wants the most recent match, not the most relevant one
+obliscence search "$QUERY" --sort=recent --json
+
 # List recent sessions for a project
 obliscence sessions --project PROJECT_NAME --json --limit 20
 
 # Show a full conversation
-obliscence show SESSION_ID_OR_SLUG
+obliscence show SESSION_ID
 
 # Resume a past session
-obliscence resume SESSION_ID_OR_SLUG
+obliscence resume SESSION_ID
 
 # List all projects
 obliscence projects --json
@@ -289,9 +293,9 @@ obliscence projects --json
 ## Tips
 
 - Start broad, then narrow with ` + "`--project`" + ` or ` + "`--role`" + ` filters.
-- Use ` + "`obliscence show SLUG`" + ` to read the full conversation once you find a relevant result.
-- Session slugs (like ` + "`warm-wondering-quill`" + `) are stable identifiers.
+- Use ` + "`obliscence show SESSION_ID`" + ` to read the full conversation once you find a relevant result. Pass the ` + "`session_id`" + ` UUID from JSON output.
 - When the user says "we worked on X recently", add ` + "`--after`" + ` with a date ~2 weeks back.
+- For "the last time I…" / "find the most recent…" queries, use ` + "`--sort=recent`" + ` so the most recent matches surface even when older messages score higher on relevance.
 `
 
 // installSkill writes the search-history skill to ~/.claude/skills/.

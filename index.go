@@ -444,8 +444,8 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 		return nil, err
 	}
 	s.insertSession, err = tx.Prepare(`
-		INSERT INTO sessions (id, project_path, project_name, slug, model, git_branch, started_at, updated_at, source_path, source_mtime, source_size)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		INSERT INTO sessions (id, project_path, project_name, model, git_branch, started_at, updated_at, source_path, source_mtime, source_size)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return nil, err
 	}
@@ -527,10 +527,7 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 				sess.projectPath, sess.projectName = resolveProject(cwd)
 			}
 		}
-		// Update slug/branch from later messages if present.
-		if s := unquote(raw["slug"]); s != "" {
-			sess.slug = s
-		}
+		// Update branch from later messages if present.
 		if s := unquote(raw["gitBranch"]); s != "" {
 			sess.gitBranch = s
 		}
@@ -584,7 +581,7 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 	_, _ = stmts.deleteSession.Exec(sess.id)
 
 	_, err = stmts.insertSession.Exec(
-		sess.id, sess.projectPath, sess.projectName, sess.slug, sess.model, sess.gitBranch,
+		sess.id, sess.projectPath, sess.projectName, sess.model, sess.gitBranch,
 		sess.startedAt, sess.updatedAt, path, mtime, info.Size(),
 	)
 	if err != nil {
@@ -634,7 +631,6 @@ type sessionMeta struct {
 	id          string
 	projectPath string
 	projectName string
-	slug        string
 	model       string
 	gitBranch   string
 	startedAt   string
@@ -671,7 +667,6 @@ func extractSessionMeta(sess *sessionMeta, raw map[string]json.RawMessage) {
 		sess.projectPath, sess.projectName = resolveProject(cwd)
 	}
 
-	sess.slug = unquote(raw["slug"])
 	sess.gitBranch = unquote(raw["gitBranch"])
 }
 

@@ -17,7 +17,6 @@ type SessionsCmd struct {
 type SessionRow struct {
 	ID          string `json:"id"`
 	ProjectName string `json:"project"`
-	Slug        string `json:"slug"`
 	Model       string `json:"model"`
 	GitBranch   string `json:"git_branch"`
 	StartedAt   string `json:"started_at"`
@@ -40,7 +39,7 @@ func (cmd *SessionsCmd) Run(rc *RunContext) error {
 	}
 
 	query := fmt.Sprintf(`
-		SELECT s.id, s.project_name, s.slug, s.model, s.git_branch, s.started_at, s.updated_at,
+		SELECT s.id, s.project_name, s.model, s.git_branch, s.started_at, s.updated_at,
 			(SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) as msg_count
 		FROM sessions s
 		%s
@@ -58,11 +57,10 @@ func (cmd *SessionsCmd) Run(rc *RunContext) error {
 
 	for rows.Next() {
 		var s SessionRow
-		var model, branch, slug sql.NullString
+		var model, branch sql.NullString
 		err := rows.Scan(
 			&s.ID,
 			&s.ProjectName,
-			&slug,
 			&model,
 			&branch,
 			&s.StartedAt,
@@ -72,7 +70,6 @@ func (cmd *SessionsCmd) Run(rc *RunContext) error {
 		if err != nil {
 			return err
 		}
-		s.Slug = slug.String
 		s.Model = model.String
 		s.GitBranch = branch.String
 		sessions = append(sessions, s)
@@ -88,7 +85,7 @@ func (cmd *SessionsCmd) Run(rc *RunContext) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "PROJECT\tSLUG\tBRANCH\tUPDATED\tMSGS\n")
+	fmt.Fprintf(w, "PROJECT\tID\tBRANCH\tUPDATED\tMSGS\n")
 
 	for _, s := range sessions {
 		updated := s.UpdatedAt
@@ -96,28 +93,20 @@ func (cmd *SessionsCmd) Run(rc *RunContext) error {
 			updated = updated[:16]
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\n",
-			s.ProjectName, s.Slug, s.GitBranch, updated, s.Messages)
+			s.ProjectName, s.ID, s.GitBranch, updated, s.Messages)
 	}
 	return w.Flush()
 }
 
 // ShowCmd displays a session conversation.
 type ShowCmd struct {
-	Session string `arg:"" help:"Session UUID or slug."`
+	Session string `arg:"" help:"Session UUID (full or unique prefix)."`
 }
 
 func (cmd *ShowCmd) Run(rc *RunContext) error {
-	// Try by ID first, then by slug.
-	var sessionID string
-	err := rc.DB.QueryRow("SELECT id FROM sessions WHERE id = ? OR slug = ?", cmd.Session, cmd.Session).
-		Scan(&sessionID)
-	if err == sql.ErrNoRows {
-		// Try partial match on slug.
-		err = rc.DB.QueryRow("SELECT id FROM sessions WHERE slug LIKE ?", "%"+cmd.Session+"%").
-			Scan(&sessionID)
-	}
+	sessionID, err := resolveSessionID(rc, cmd.Session)
 	if err != nil {
-		return fmt.Errorf("session not found: %s", cmd.Session)
+		return err
 	}
 
 	rows, err := rc.DB.Query(`
@@ -270,6 +259,45 @@ func (cmd *ProjectsCmd) Run(rc *RunContext) error {
 		fmt.Fprintf(w, "%s\t%d\t%s\n", p.Name, p.Sessions, updated)
 	}
 	return w.Flush()
+}
+
+// resolveSessionID resolves an exact UUID or unique UUID prefix to a session
+// ID. Returns an error if no session matches or if the prefix is ambiguous.
+func resolveSessionID(rc *RunContext, input string) (string, error) {
+	var id string
+	err := rc.DB.QueryRow("SELECT id FROM sessions WHERE id = ?", input).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", err
+	}
+
+	rows, err := rc.DB.Query(
+		"SELECT id FROM sessions WHERE id LIKE ? LIMIT 2",
+		input+"%",
+	)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var matches []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return "", err
+		}
+		matches = append(matches, m)
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("session not found: %s", input)
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("ambiguous session prefix %q — provide more characters", input)
+	}
 }
 
 func formatBytes(b int64) string {
