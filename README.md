@@ -31,6 +31,7 @@ obliscence index              # Index new/changed sessions
 obliscence search "query"     # Full-text search (BM25)
 obliscence search --semantic  # Vector similarity search
 obliscence search --hybrid    # FTS5 + semantic via reciprocal rank fusion
+obliscence corrections        # Find user messages that correct/push back on the assistant
 obliscence sessions           # List recent sessions
 obliscence show <session-id>  # Display a conversation (full UUID or unique prefix)
 obliscence resume <session-id> # Resume a session in Claude Code
@@ -84,6 +85,17 @@ To remove everything: `obliscence uninstall` (removes hooks, skill, and download
 ## Semantic search
 
 `--semantic` finds results by meaning — "how to fix flaky tests" matches discussions about test reliability even without the word "flaky". `--hybrid` merges keyword and semantic results via reciprocal rank fusion. Embeddings are generated during `obliscence index` (skip with `--no-embed`).
+
+## Corrections
+
+`obliscence corrections` finds the user messages where you corrected, redirected, or pushed back on the assistant — a speech-act that keyword and semantic search both miss. It's a deterministic lexical scorer (negation/imperative/frustration cues, emphasis, terse phrasing) over already-indexed data, with a length cap and compaction-summary exclusion to keep out injected skill/agent text. Useful for distilling recurring frictions into CLAUDE.md rules.
+
+```
+obliscence corrections --min-score 8              # high precision
+obliscence corrections --project home-app --after 2026-05-01 --json
+```
+
+`--min-score` is the precision dial (≥8 is almost all genuine corrections; lower widens recall and admits some questions/excitement). Other flags: `--max-len`, `--project`, `--after`/`--before`, `--sort score|recent`.
 
 ## Performance
 

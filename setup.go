@@ -258,7 +258,9 @@ description: >-
   Search past conversations via obliscence. USE PROACTIVELY — invoke BEFORE codebase
   searches when the user recalls past work. Triggers: "remind me", "where does X live",
   "what did we do", "remember when", "how did we solve", "last time", "did we ever",
-  "which repo", "which project", "in a previous session".
+  "which repo", "which project", "in a previous session". Also surfaces past
+  corrections/frustrations for "what do I keep correcting", "recurring frustrations",
+  "audit my CLAUDE.md", "what rules/preferences am I missing", "what do I push back on".
 ---
 
 Search past Claude Code conversations using obliscence. Use ` + "`--json`" + ` for structured output,
@@ -308,6 +310,24 @@ obliscence resume SESSION_ID
 obliscence projects --json
 ` + "```" + `
 
+## Finding corrections / recurring frustrations
+
+For "what do I keep correcting", "what frustrates me", "audit my CLAUDE.md", or
+"what preferences/rules am I missing", use ` + "`corrections`" + ` — it finds user messages
+that push back on or correct the assistant (a speech-act that keyword and semantic
+search both miss).
+
+` + "```" + `bash
+# High-precision pass (score >= 8 is almost all genuine corrections)
+obliscence corrections --min-score 8 --json
+
+# Broader pass; lower min-score widens recall (and adds some questions/excitement)
+obliscence corrections --min-score 5 --project PROJECT_NAME --after 2026-05-01 --json
+` + "```" + `
+
+Each result carries ` + "`session_id`" + ` and ` + "`message_id`" + `; pass ` + "`session_id`" + ` to
+` + "`obliscence show`" + ` to read the surrounding conversation.
+
 ## Tips
 
 - Start broad, then narrow with ` + "`--project`" + ` or ` + "`--role`" + ` filters.
@@ -316,16 +336,16 @@ obliscence projects --json
 - For "the last time I…" / "find the most recent…" queries, use ` + "`--sort=recent`" + ` so the most recent matches surface even when older messages score higher on relevance.
 `
 
-// installSkill writes the search-history skill to ~/.claude/skills/.
+// installSkill writes the search-history skill to ~/.claude/skills/. The skill
+// is generated content, so it's rewritten on every setup to stay in sync with
+// the binary (e.g. when new commands are added).
 func (cmd *SetupCmd) installSkill() {
 	skillDir := expandPath("~/.claude/skills/search-history")
 	skillPath := filepath.Join(skillDir, "SKILL.md")
 
-	if !cmd.Force {
-		if _, err := os.Stat(skillPath); err == nil {
-			fmt.Fprintln(os.Stderr, "skill already installed")
-			return
-		}
+	if existing, err := os.ReadFile(skillPath); err == nil && string(existing) == skillContent {
+		fmt.Fprintln(os.Stderr, "skill already up to date")
+		return
 	}
 
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {

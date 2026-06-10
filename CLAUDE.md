@@ -18,6 +18,7 @@ Flat structure, single package. Each file maps to a concern:
 - `db.go` — SQLite schema, open, RunContext
 - `index.go` — JSONL parsing, incremental indexing, embedding generation
 - `search.go` — FTS5 search, semantic search, hybrid (RRF) search
+- `corrections.go` — lexical detector for user messages that correct/push back on the assistant
 - `sessions.go` — sessions/show/stats/projects/resume commands
 - `output.go` — TTY detection, color, JSON output
 - `hook.go` — Claude Code hook handler (stdin JSON, always exits 0)
@@ -40,6 +41,7 @@ Flat structure, single package. Each file maps to a concern:
 - User + assistant messages indexed; tool output excluded (too noisy)
 - Tool uses stored as metadata only (tool name + summarized input)
 - Empty-content messages skipped during embedding and filtered from search results
+- `corrections` is a deterministic lexical scorer (no model): weighted negation/imperative/frustration cues + emphasis, gated by a length cap and `is_compact_summary` exclusion to drop injected skill/summary/agent text. Finds a speech-act that keyword/semantic search can't
 
 ## Database
 
