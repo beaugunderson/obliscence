@@ -277,7 +277,8 @@ func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
 		}
 
 		vecStmt, err := tx.Prepare(
-			"INSERT OR IGNORE INTO messages_vec(embedding, message_rowid) VALUES (?, ?)")
+			"INSERT OR IGNORE INTO messages_vec(embedding, message_rowid, chunk_index, chunk_start, chunk_end) VALUES (?, ?, ?, ?, ?)",
+		)
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -291,15 +292,17 @@ func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
 		}
 
 		for _, item := range batch {
-			vec, err := embedder.Embed(item.content)
-			if err != nil {
-				continue
+			for idx, ch := range chunkText(item.content) {
+				vec, err := embedder.EmbedDocument(ch.text)
+				if err != nil {
+					continue
+				}
+				serialized, err := serializeVec(vec)
+				if err != nil {
+					continue
+				}
+				_, _ = vecStmt.Exec(serialized, item.rowid, idx, ch.start, ch.end)
 			}
-			serialized, err := serializeVec(vec)
-			if err != nil {
-				continue
-			}
-			_, _ = vecStmt.Exec(serialized, item.rowid)
 			_, _ = trackStmt.Exec(item.rowid)
 			done++
 			if showProgress {

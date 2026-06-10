@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"unicode"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/daulet/tokenizers"
@@ -15,7 +16,25 @@ func serializeVec(v []float32) ([]byte, error) {
 	return sqlite_vec.SerializeFloat32(v)
 }
 
-const maxSeqLen = 256
+const maxSeqLen = 512
+
+// Chunking parameters. Long messages are split into overlapping windows so
+// each is embedded independently — this avoids diluting one vector across a
+// whole message and prevents the tail of a long message from being dropped.
+// chunkSize is in characters and stays comfortably under maxSeqLen tokens for
+// English (~4 chars/token).
+const (
+	chunkSize    = 1200
+	chunkOverlap = 200
+)
+
+// textChunk is a slice of a message, with character offsets (0-based, end
+// exclusive) so the matching chunk can be rendered as a snippet via substr.
+type textChunk struct {
+	text  string
+	start int
+	end   int
+}
 
 // Embedder generates text embeddings using a local ONNX model.
 // Create with NewEmbedder; nil means embedding is not available.
@@ -29,12 +48,16 @@ type Embedder struct {
 func NewEmbedder() (*Embedder, error) {
 	libPath := onnxRuntimeLibPath()
 	modelPath := onnxModelPath()
+	tokPath := tokenizerPath()
 
 	// Check if model files exist.
 	if _, err := os.Stat(libPath); err != nil {
 		return nil, nil
 	}
 	if _, err := os.Stat(modelPath); err != nil {
+		return nil, nil
+	}
+	if _, err := os.Stat(tokPath); err != nil {
 		return nil, nil
 	}
 
@@ -44,9 +67,12 @@ func NewEmbedder() (*Embedder, error) {
 		return nil, fmt.Errorf("initializing ONNX Runtime: %w", err)
 	}
 
-	// Load tokenizer from HuggingFace (downloads/caches automatically).
-	tk, err := tokenizers.FromPretrained(modelName)
+	// Load tokenizer from the local file downloaded at setup.
+	tk, err := tokenizers.FromFile(tokPath)
 	if err != nil {
+		// InitializeEnvironment succeeded above; release it so a later
+		// NewEmbedder can re-initialize the global ONNX environment.
+		ort.DestroyEnvironment()
 		return nil, fmt.Errorf("loading tokenizer: %w", err)
 	}
 
@@ -59,6 +85,7 @@ func NewEmbedder() (*Embedder, error) {
 	)
 	if err != nil {
 		tk.Close()
+		ort.DestroyEnvironment()
 		return nil, fmt.Errorf("creating ONNX session: %w", err)
 	}
 
@@ -82,8 +109,19 @@ func (e *Embedder) Close() {
 	ort.DestroyEnvironment()
 }
 
-// Embed generates a 384-dimensional embedding for the given text.
-func (e *Embedder) Embed(text string) ([]float32, error) {
+// EmbedQuery embeds a search query. arctic-embed is asymmetric: queries get a
+// prefix, documents do not.
+func (e *Embedder) EmbedQuery(text string) ([]float32, error) {
+	return e.embed(queryPrefix + text)
+}
+
+// EmbedDocument embeds a document (a message or message chunk), no prefix.
+func (e *Embedder) EmbedDocument(text string) ([]float32, error) {
+	return e.embed(text)
+}
+
+// embed generates a 384-dimensional embedding for the given text.
+func (e *Embedder) embed(text string) ([]float32, error) {
 	if e == nil {
 		return nil, fmt.Errorf("embedder not available — run 'obliscence setup' first")
 	}
@@ -153,12 +191,68 @@ func (e *Embedder) Embed(text string) ([]float32, error) {
 		return nil, fmt.Errorf("running inference: %w", err)
 	}
 
-	// Mean pool + L2 normalize.
+	// Pool + L2 normalize. arctic-embed uses CLS pooling (first token);
+	// MiniLM-style models use mean pooling.
 	tokenEmbeddings := outputTensor.GetData()
-	attMaskF32 := uint32ToFloat32(attentionMask)
-
-	pooled := meanPool(tokenEmbeddings, attMaskF32, seqLen, embeddingDim)
+	var pooled []float32
+	if usesCLSPooling {
+		pooled = clsPool(tokenEmbeddings, embeddingDim)
+	} else {
+		pooled = meanPool(tokenEmbeddings, uint32ToFloat32(attentionMask), seqLen, embeddingDim)
+	}
 	return l2Normalize(pooled), nil
+}
+
+// chunkText splits s into overlapping character windows, preferring to break at
+// whitespace near each window boundary. Offsets are character (rune) positions,
+// matching SQLite's substr semantics on UTF-8 text.
+func chunkText(s string) []textChunk {
+	runes := []rune(s)
+	n := len(runes)
+	if n == 0 {
+		return nil
+	}
+	if n <= chunkSize {
+		return []textChunk{{text: s, start: 0, end: n}}
+	}
+
+	var chunks []textChunk
+	start := 0
+	for start < n {
+		end := start + chunkSize
+		if end >= n {
+			end = n
+		} else {
+			// Snap the boundary back to the last whitespace within a window so
+			// chunks don't split mid-word.
+			for i := end; i > end-150 && i > start; i-- {
+				if unicode.IsSpace(runes[i]) {
+					end = i
+					break
+				}
+			}
+		}
+		chunks = append(chunks, textChunk{
+			text:  string(runes[start:end]),
+			start: start,
+			end:   end,
+		})
+		if end >= n {
+			break
+		}
+		start = end - chunkOverlap
+		if start < 0 {
+			start = 0
+		}
+	}
+	return chunks
+}
+
+// clsPool returns the first token's embedding (the [CLS] token).
+func clsPool(tokenEmbeddings []float32, dim int) []float32 {
+	out := make([]float32, dim)
+	copy(out, tokenEmbeddings[:dim])
+	return out
 }
 
 func uint32ToInt64(ids []uint32) []int64 {

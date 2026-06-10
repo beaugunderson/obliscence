@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,13 @@ import (
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// embedSchemaVersion is bumped whenever the embedding model, pooling, or vec
+// table layout changes, forcing a full re-embed on next index.
+//
+//	1: all-MiniLM-L6-v2, mean pooling, one vector per message
+//	2: snowflake-arctic-embed-s, CLS pooling, chunked (multiple vectors/message)
+const embedSchemaVersion = 2
 
 // RunContext is passed to every subcommand via kong.
 type RunContext struct {
@@ -39,6 +47,35 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
+
+	// Migrate the vector store when the embedding model/layout changes. All old
+	// vectors are invalid across models, so drop and recreate the vec table and
+	// clear the embedding-tracking table to force a full re-embed on next index.
+	var ver int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&ver); err != nil {
+		return err
+	}
+	if ver < embedSchemaVersion {
+		if _, err := db.Exec("DROP TABLE IF EXISTS messages_vec"); err != nil {
+			return err
+		}
+		if _, err := db.Exec("DELETE FROM embedded_messages"); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(vecSchema); err != nil {
+		return err
+	}
+	if ver < embedSchemaVersion {
+		if _, err := db.Exec(
+			fmt.Sprintf("PRAGMA user_version = %d", embedSchemaVersion),
+		); err != nil {
+			return err
+		}
+		// Nothing to backfill after a model migration — both tables are empty.
+		return nil
+	}
+
 	// One-time backfill: populate embedded_messages from messages_vec rows that
 	// still correspond to existing messages. Stale entries in messages_vec (from
 	// re-indexed sessions whose old embeddings were never cleaned up) are pruned.
@@ -111,12 +148,6 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
     INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
 
--- Vector table for future embeddings.
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_vec USING vec0(
-    embedding float[384],
-    +message_rowid INTEGER
-);
-
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
@@ -135,6 +166,19 @@ CREATE TABLE IF NOT EXISTS indexed_files (
     path TEXT PRIMARY KEY,
     mtime REAL NOT NULL,
     size INTEGER NOT NULL
+);
+`
+
+// vecSchema is created/recreated separately so a model migration can drop and
+// rebuild it. One row per message chunk; chunk_start/chunk_end are character
+// offsets into messages.content for snippet rendering.
+const vecSchema = `
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_vec USING vec0(
+    embedding float[384],
+    +message_rowid INTEGER,
+    +chunk_index INTEGER,
+    +chunk_start INTEGER,
+    +chunk_end INTEGER
 );
 `
 

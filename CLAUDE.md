@@ -21,14 +21,18 @@ Flat structure, single package. Each file maps to a concern:
 - `sessions.go` — sessions/show/stats/projects/resume commands
 - `output.go` — TTY detection, color, JSON output
 - `hook.go` — Claude Code hook handler (stdin JSON, always exits 0)
-- `embed.go` — ONNX Runtime embedding pipeline (tokenize → infer → mean pool → L2 normalize)
-- `setup.go` — download ONNX Runtime + all-MiniLM-L6-v2 model
+- `embed.go` — ONNX Runtime embedding pipeline (tokenize → infer → CLS pool → L2 normalize), plus message chunking
+- `setup.go` — download ONNX Runtime + snowflake-arctic-embed-s model + tokenizer.json
 - `resume.go` — resume a session in Claude Code
 
 ## Key design decisions
 
 - FTS5 with Porter stemming + BM25 for keyword search
-- sqlite-vec with all-MiniLM-L6-v2 (384-dim) for semantic search
+- sqlite-vec with snowflake-arctic-embed-s (384-dim, CLS pooling) for semantic search
+- Asymmetric retrieval: queries get a prefix (`EmbedQuery`), documents do not (`EmbedDocument`)
+- Long messages are chunked into overlapping windows; each chunk is a separate vec row, deduped to the nearest chunk per message at search time. Snippet is the matching chunk
+- Tokenizer (`tokenizer.json`) is downloaded once at setup and loaded from disk — never per-embed over the network
+- `embedSchemaVersion` (PRAGMA user_version) gates a re-embed: bump it when the model/pooling/vec layout changes and the next `index` re-embeds everything
 - DynamicAdvancedSession reuses the ONNX session across embed calls
 - Incremental indexing via `indexed_files` table tracking mtime + size
 - Project name derived from `cwd` field in JSONL messages (`filepath.Base(cwd)`)
@@ -43,4 +47,4 @@ Flat structure, single package. Each file maps to a concern:
 
 ## Models
 
-`~/.obliscence/models/` — ONNX Runtime shared library + all-MiniLM-L6-v2 ONNX model. Downloaded by `obliscence setup`. Optional — FTS5 search works without them.
+`~/.obliscence/models/` — ONNX Runtime shared library + snowflake-arctic-embed-s ONNX model + tokenizer.json. Downloaded by `obliscence setup` (int8-quantized model on arm64, fp32 elsewhere). Optional — FTS5 search works without them.

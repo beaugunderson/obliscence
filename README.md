@@ -46,10 +46,11 @@ obliscence stats              # Database statistics
 --limit, -l     Max results (default 20)
 --after, -a     Results after date (YYYY-MM-DD)
 --before, -b    Results before date (YYYY-MM-DD)
---semantic      Vector similarity search (requires setup)
---hybrid        FTS5 + semantic via reciprocal rank fusion
---sort          relevance (default) or recent
---json          Machine-readable output
+--semantic         Vector similarity search (requires setup)
+--hybrid           FTS5 + semantic via reciprocal rank fusion
+--semantic-weight  Hybrid: weight semantic results vs keyword (default 1.0; >1 favors conceptual matches)
+--sort             relevance (default) or recent
+--json             Machine-readable output
 ```
 
 ### Examples
@@ -68,7 +69,7 @@ obliscence search "terraform" --json | jq '.[].snippet'
 
 `obliscence setup` does everything:
 
-1. Downloads ONNX Runtime + all-MiniLM-L6-v2 model (~55MB total) for semantic search
+1. Downloads ONNX Runtime + snowflake-arctic-embed-s model + tokenizer for semantic search
 2. Installs Claude Code hooks in `~/.claude/settings.json`:
    - `SessionStart` — runs a full incremental scan (with embeddings) to catch any sessions that ended without firing `SessionEnd` (terminal closed, process killed, etc.)
    - `SessionEnd` — indexes the conversation when a session ends cleanly
@@ -100,6 +101,6 @@ To remove everything: `obliscence uninstall` (removes hooks, skill, and download
 
 ## Database
 
-Stored at `~/.obliscence/db.sqlite` (override with `--db` or `OBLISCENCE_DB`). FTS5 with Porter stemming for keyword search, sqlite-vec with all-MiniLM-L6-v2 (384-dim) for semantic search.
+Stored at `~/.obliscence/db.sqlite` (override with `--db` or `OBLISCENCE_DB`). FTS5 with Porter stemming for keyword search, sqlite-vec with snowflake-arctic-embed-s (384-dim) for semantic search. Long messages are chunked into overlapping windows so a query matching any part of a message still finds it.
 
 Suggested alias: `alias ob=obliscence`

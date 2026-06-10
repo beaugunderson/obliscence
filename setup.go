@@ -128,8 +128,13 @@ func (cmd *UninstallCmd) removeModels() {
 
 const (
 	onnxRuntimeVersion = "1.22.0"
-	modelName          = "sentence-transformers/all-MiniLM-L6-v2"
+	modelName          = "Snowflake/snowflake-arctic-embed-s"
 	embeddingDim       = 384
+
+	// arctic-embed uses CLS pooling and an asymmetric query prefix (documents
+	// are embedded without a prefix).
+	usesCLSPooling = true
+	queryPrefix    = "Represent this sentence for searching relevant passages: "
 )
 
 func modelsDir() string {
@@ -152,7 +157,16 @@ func onnxRuntimeLibPath() string {
 }
 
 func onnxModelPath() string {
-	return filepath.Join(modelsDir(), "all-MiniLM-L6-v2", "model.onnx")
+	return filepath.Join(modelsDir(), "snowflake-arctic-embed-s", "model.onnx")
+}
+
+func tokenizerPath() string {
+	return filepath.Join(modelsDir(), "snowflake-arctic-embed-s", "tokenizer.json")
+}
+
+// hfFileURL builds a HuggingFace resolve URL for a file in the model repo.
+func hfFileURL(relPath string) string {
+	return fmt.Sprintf("https://huggingface.co/%s/resolve/main/%s", modelName, relPath)
 }
 
 func (cmd *SetupCmd) Run(rc *RunContext) error {
@@ -167,6 +181,10 @@ func (cmd *SetupCmd) Run(rc *RunContext) error {
 
 	if err := cmd.downloadModel(); err != nil {
 		return fmt.Errorf("downloading model: %w", err)
+	}
+
+	if err := cmd.downloadTokenizer(); err != nil {
+		return fmt.Errorf("downloading tokenizer: %w", err)
 	}
 
 	cmd.installHooks()
@@ -360,13 +378,38 @@ func (cmd *SetupCmd) downloadModel() error {
 		}
 	}
 
-	// Use quantized ARM64 model when available — ~4x smaller, ~2x faster inference.
+	// Use the int8-quantized model on ARM64 — ~4x smaller, faster inference,
+	// negligible retrieval-quality loss; fp32 elsewhere.
 	modelFile := "model.onnx"
 	if runtime.GOARCH == "arm64" {
-		modelFile = "model_qint8_arm64.onnx"
+		modelFile = "model_int8.onnx"
 	}
-	url := "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/" + modelFile
-	fmt.Fprintf(os.Stderr, "downloading all-MiniLM-L6-v2 ONNX model (%s)...\n", modelFile)
+	url := hfFileURL("onnx/" + modelFile)
+	fmt.Fprintf(os.Stderr, "downloading snowflake-arctic-embed-s ONNX model (%s)...\n", modelFile)
+
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+
+	return downloadFile(url, dest)
+}
+
+// downloadTokenizer fetches tokenizer.json once at setup. NewEmbedder then loads
+// it from disk, avoiding a network round-trip on every embed call.
+func (cmd *SetupCmd) downloadTokenizer() error {
+	dest := tokenizerPath()
+	if !cmd.Force {
+		if _, err := os.Stat(dest); err == nil {
+			fmt.Fprintln(
+				os.Stderr,
+				"tokenizer already downloaded, skipping (use --force to re-download)",
+			)
+			return nil
+		}
+	}
+
+	url := hfFileURL("tokenizer.json")
+	fmt.Fprintln(os.Stderr, "downloading tokenizer...")
 
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err

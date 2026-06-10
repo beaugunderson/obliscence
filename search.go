@@ -5,18 +5,45 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
+// ftsQuery converts free-text into a safe FTS5 MATCH expression: it extracts
+// word tokens and quotes each, joined by space (implicit AND). This neutralizes
+// FTS5 operators and punctuation so "belt and suspenders" and
+// "belt-and-suspenders" search identically, and a stray "OR"/"-" can't turn
+// into a parse error. Returns "" when the query contains no word characters.
+func ftsQuery(raw string) string {
+	var tokens []string
+	var b strings.Builder
+	flush := func() {
+		if b.Len() > 0 {
+			tokens = append(tokens, `"`+b.String()+`"`)
+			b.Reset()
+		}
+	}
+	for _, r := range raw {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			b.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return strings.Join(tokens, " ")
+}
+
 type SearchCmd struct {
-	Query    string `arg:"" help:"Search query."`
-	Project  string `       help:"Filter by project name."                     short:"p"`
-	Role     string `       help:"Filter by role (user, assistant)."           short:"r"`
-	Limit    int    `       help:"Max results."                                short:"l" default:"20"`
-	After    string `       help:"Only results after this date (YYYY-MM-DD)."  short:"a"`
-	Before   string `       help:"Only results before this date (YYYY-MM-DD)." short:"b"`
-	Semantic bool   `       help:"Use semantic (vector) search."                                             name:"semantic"`
-	Hybrid   bool   `       help:"Combine FTS5 and semantic search."                                         name:"hybrid"`
-	Sort     string `       help:"Sort order: relevance (default) or recent."            default:"relevance"                 enum:"relevance,recent"`
+	Query          string  `arg:"" help:"Search query."`
+	Project        string  `       help:"Filter by project name."                                                                      short:"p"`
+	Role           string  `       help:"Filter by role (user, assistant)."                                                            short:"r"`
+	Limit          int     `       help:"Max results."                                                                                 short:"l" default:"20"`
+	After          string  `       help:"Only results after this date (YYYY-MM-DD)."                                                   short:"a"`
+	Before         string  `       help:"Only results before this date (YYYY-MM-DD)."                                                  short:"b"`
+	Semantic       bool    `       help:"Use semantic (vector) search."                                                                                              name:"semantic"`
+	Hybrid         bool    `       help:"Combine FTS5 and semantic search."                                                                                          name:"hybrid"`
+	Sort           string  `       help:"Sort order: relevance (default) or recent."                                                             default:"relevance"                        enum:"relevance,recent"`
+	SemanticWeight float64 `       help:"Hybrid: weight semantic results relative to keyword (>1 favors semantic/conceptual matches)."           default:"1.0"       name:"semantic-weight"`
 }
 
 type SearchResult struct {
@@ -42,11 +69,16 @@ func (cmd *SearchCmd) Run(rc *RunContext) error {
 
 // runFTS performs a standard FTS5/BM25 search.
 func (cmd *SearchCmd) runFTS(rc *RunContext) error {
+	match := ftsQuery(cmd.Query)
+	if match == "" {
+		return cmd.printResults(rc, nil)
+	}
+
 	var where []string
 	var args []interface{}
 
 	where = append(where, "messages_fts MATCH ?")
-	args = append(args, cmd.Query)
+	args = append(args, match)
 
 	if cmd.Project != "" {
 		where = append(where, "s.project_name LIKE ?")
@@ -110,7 +142,7 @@ func (cmd *SearchCmd) runSemantic(rc *RunContext) error {
 	}
 	defer embedder.Close()
 
-	queryVec, err := embedder.Embed(cmd.Query)
+	queryVec, err := embedder.EmbedQuery(cmd.Query)
 	if err != nil {
 		return fmt.Errorf("embedding query: %w", err)
 	}
@@ -186,7 +218,7 @@ func (cmd *SearchCmd) runHybrid(rc *RunContext) error {
 	}
 
 	// Get semantic results.
-	queryVec, err := embedder.Embed(cmd.Query)
+	queryVec, err := embedder.EmbedQuery(cmd.Query)
 	if err != nil {
 		return fmt.Errorf("embedding query: %w", err)
 	}
@@ -195,8 +227,13 @@ func (cmd *SearchCmd) runHybrid(rc *RunContext) error {
 		return fmt.Errorf("semantic search: %w", err)
 	}
 
-	// Reciprocal Rank Fusion (k=60).
+	// Reciprocal Rank Fusion (k=60). semWeight scales the semantic side so
+	// callers can favor conceptual matches over exact-keyword ones.
 	const k = 60.0
+	semWeight := cmd.SemanticWeight
+	if semWeight <= 0 {
+		semWeight = 1.0
+	}
 	scores := make(map[string]float64)
 	resultMap := make(map[string]SearchResult)
 
@@ -205,7 +242,7 @@ func (cmd *SearchCmd) runHybrid(rc *RunContext) error {
 		resultMap[r.MessageID] = r
 	}
 	for rank, r := range semResults {
-		scores[r.MessageID] += 1.0 / (k + float64(rank+1))
+		scores[r.MessageID] += semWeight / (k + float64(rank+1))
 		if _, exists := resultMap[r.MessageID]; !exists {
 			resultMap[r.MessageID] = r
 		}
@@ -253,11 +290,16 @@ func (cmd *SearchCmd) runHybrid(rc *RunContext) error {
 
 // ftsResults returns FTS search results as a slice (for hybrid merging).
 func (cmd *SearchCmd) ftsResults(rc *RunContext) ([]SearchResult, error) {
+	match := ftsQuery(cmd.Query)
+	if match == "" {
+		return nil, nil
+	}
+
 	var where []string
 	var args []interface{}
 
 	where = append(where, "messages_fts MATCH ?")
-	args = append(args, cmd.Query)
+	args = append(args, match)
 
 	if cmd.Project != "" {
 		where = append(where, "s.project_name LIKE ?")
@@ -316,29 +358,130 @@ func (cmd *SearchCmd) semanticResults(
 		return nil, err
 	}
 
-	// sqlite-vec KNN queries can only have MATCH + k constraints.
-	// Join with messages/sessions after the KNN lookup.
-	rows, err := rc.DB.Query(`
-		SELECT
-			m.id, m.session_id, s.project_name, m.role, m.timestamp,
-			substr(m.content, 1, 500) as snip,
-			knn.distance as score, s.git_branch
-		FROM (
-			SELECT rowid, distance
-			FROM messages_vec
-			WHERE embedding MATCH ? AND k = ?
-		) knn
-		JOIN messages m ON m.rowid = knn.rowid
-		JOIN sessions s ON s.id = m.session_id
-		ORDER BY knn.distance`,
-		serialized, limit,
+	// Messages are chunked, so multiple vec rows can belong to one message. The
+	// KNN query must stand alone — joining message/session tables to it makes
+	// SQLite push a constraint onto a vec0 auxiliary column, which is illegal.
+	// So fetch the nearest chunks first, dedup to the best chunk per message,
+	// then look up message/session data in a second query. Over-fetch chunks so
+	// dedup still yields `limit` distinct messages.
+	const chunkOverfetch = 4
+	rows, err := rc.DB.Query(
+		`SELECT message_rowid, chunk_start, chunk_end, distance
+		 FROM messages_vec
+		 WHERE embedding MATCH ? AND k = ?
+		 ORDER BY distance`,
+		serialized, limit*chunkOverfetch,
 	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	return scanResults(rows)
+	type chunkHit struct {
+		rowid      int64
+		start, end int
+		distance   float64
+	}
+	var hits []chunkHit
+	seen := make(map[int64]bool)
+	for rows.Next() {
+		var h chunkHit
+		if err := rows.Scan(&h.rowid, &h.start, &h.end, &h.distance); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if seen[h.rowid] {
+			continue // keep only the nearest chunk per message
+		}
+		seen[h.rowid] = true
+		hits = append(hits, h)
+		if len(hits) >= limit {
+			break
+		}
+	}
+	rows.Close()
+	if len(hits) == 0 {
+		return nil, nil
+	}
+
+	// Look up message/session data for the matched messages in one query.
+	placeholders := make([]string, len(hits))
+	idArgs := make([]interface{}, len(hits))
+	for i, h := range hits {
+		placeholders[i] = "?"
+		idArgs[i] = h.rowid
+	}
+	dataRows, err := rc.DB.Query(fmt.Sprintf(`
+		SELECT m.rowid, m.id, m.session_id, s.project_name, m.role, m.timestamp, m.content, s.git_branch
+		FROM messages m
+		JOIN sessions s ON s.id = m.session_id
+		WHERE m.rowid IN (%s)`, strings.Join(placeholders, ",")), idArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer dataRows.Close()
+
+	type msgData struct {
+		id, sessionID, project, role, timestamp, content, gitBranch string
+	}
+	byRowid := make(map[int64]msgData, len(hits))
+	for dataRows.Next() {
+		var rowid int64
+		var d msgData
+		if err := dataRows.Scan(
+			&rowid,
+			&d.id,
+			&d.sessionID,
+			&d.project,
+			&d.role,
+			&d.timestamp,
+			&d.content,
+			&d.gitBranch,
+		); err != nil {
+			return nil, err
+		}
+		byRowid[rowid] = d
+	}
+
+	// Assemble results in nearest-first order, snippeting the matching chunk.
+	var results []SearchResult
+	for _, h := range hits {
+		d, ok := byRowid[h.rowid]
+		if !ok {
+			continue
+		}
+		snippet := truncate(strings.TrimSpace(runeSlice(d.content, h.start, h.end)), 200)
+		if snippet == "" {
+			continue
+		}
+		results = append(results, SearchResult{
+			MessageID: d.id,
+			SessionID: d.sessionID,
+			Project:   d.project,
+			Role:      d.role,
+			Timestamp: d.timestamp,
+			Snippet:   snippet,
+			Score:     h.distance,
+			GitBranch: d.gitBranch,
+		})
+	}
+	return results, nil
+}
+
+// runeSlice returns the substring between character offsets [start, end),
+// clamped to valid bounds. Offsets are rune positions, matching how chunks were
+// recorded during indexing.
+func runeSlice(s string, start, end int) string {
+	r := []rune(s)
+	if start < 0 {
+		start = 0
+	}
+	if end > len(r) {
+		end = len(r)
+	}
+	if start >= end {
+		return ""
+	}
+	return string(r[start:end])
 }
 
 func scanResults(rows *sql.Rows) ([]SearchResult, error) {
@@ -357,6 +500,9 @@ func scanResults(rows *sql.Rows) ([]SearchResult, error) {
 			continue // Skip messages with no text content.
 		}
 		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
