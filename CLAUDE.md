@@ -28,7 +28,8 @@ Flat structure, single package. Each file maps to a concern:
 
 ## Key design decisions
 
-- FTS5 with Porter stemming + BM25 for keyword search
+- FTS5 with Porter stemming + BM25 for keyword search; `search -e/--exact` wraps the query tokens in one FTS5 phrase so they must be adjacent and in order (default ANDs the tokens at any distance)
+- Grouped (non-JSON) search output is fully chronological: hits within a session, sessions within a project, and projects against each other all sort by timestamp ascending, so the result reads top-to-bottom in the order work happened
 - sqlite-vec with snowflake-arctic-embed-s (384-dim, CLS pooling) for semantic search
 - Asymmetric retrieval: queries get a prefix (`EmbedQuery`), documents do not (`EmbedDocument`)
 - Long messages are chunked into overlapping windows; each chunk is a separate vec row, deduped to the nearest chunk per message at search time. Snippet is the matching chunk

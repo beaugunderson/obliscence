@@ -7,20 +7,30 @@ import (
 )
 
 func TestFTSQuery(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"belt and suspenders", `"belt" "and" "suspenders"`},
-		{"belt-and-suspenders", `"belt" "and" "suspenders"`}, // must match the spaced form
-		{"rate-limiting", `"rate" "limiting"`},
-		{"foo/bar", `"foo" "bar"`},
-		{"what's this", `"what" "s" "this"`},
-		{"OR", `"OR"`}, // FTS5 operator neutralized
-		{"C++ code", `"C" "code"`},
-		{"  ", ""}, // no word tokens
-		{"!@#$", ""},
+	cases := []struct {
+		in    string
+		exact bool
+		want  string
+	}{
+		{"belt and suspenders", false, `"belt" "and" "suspenders"`},
+		{"belt-and-suspenders", false, `"belt" "and" "suspenders"`}, // must match the spaced form
+		{"rate-limiting", false, `"rate" "limiting"`},
+		{"foo/bar", false, `"foo" "bar"`},
+		{"what's this", false, `"what" "s" "this"`},
+		{"OR", false, `"OR"`}, // FTS5 operator neutralized
+		{"C++ code", false, `"C" "code"`},
+		{"  ", false, ""}, // no word tokens
+		{"!@#$", false, ""},
+		// Exact mode wraps the tokens in a single phrase (adjacent, in order).
+		{"open a PR", true, `"open a PR"`},
+		{"belt-and-suspenders", true, `"belt and suspenders"`},
+		{"single", true, `"single"`},
+		{"  ", true, ""},
+		{"!@#$", true, ""},
 	}
 	for _, c := range cases {
-		if got := ftsQuery(c.in); got != c.want {
-			t.Errorf("ftsQuery(%q) = %q, want %q", c.in, got, c.want)
+		if got := ftsQuery(c.in, c.exact); got != c.want {
+			t.Errorf("ftsQuery(%q, %v) = %q, want %q", c.in, c.exact, got, c.want)
 		}
 	}
 }

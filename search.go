@@ -8,17 +8,19 @@ import (
 	"unicode"
 )
 
-// ftsQuery converts free-text into a safe FTS5 MATCH expression: it extracts
-// word tokens and quotes each, joined by space (implicit AND). This neutralizes
-// FTS5 operators and punctuation so "belt and suspenders" and
-// "belt-and-suspenders" search identically, and a stray "OR"/"-" can't turn
-// into a parse error. Returns "" when the query contains no word characters.
-func ftsQuery(raw string) string {
+// ftsQuery converts free-text into a safe FTS5 MATCH expression. It extracts
+// word tokens (neutralizing FTS5 operators and punctuation so a stray "OR"/"-"
+// can't turn into a parse error) and joins them. When exact is false each token
+// is quoted separately, giving implicit AND, so "belt and suspenders" and
+// "belt-and-suspenders" search identically. When exact is true the tokens are
+// wrapped in a single quoted phrase, so they must appear adjacent and in order.
+// Returns "" when the query contains no word characters.
+func ftsQuery(raw string, exact bool) string {
 	var tokens []string
 	var b strings.Builder
 	flush := func() {
 		if b.Len() > 0 {
-			tokens = append(tokens, `"`+b.String()+`"`)
+			tokens = append(tokens, b.String())
 			b.Reset()
 		}
 	}
@@ -30,6 +32,15 @@ func ftsQuery(raw string) string {
 		}
 	}
 	flush()
+	if len(tokens) == 0 {
+		return ""
+	}
+	if exact {
+		return `"` + strings.Join(tokens, " ") + `"`
+	}
+	for i, t := range tokens {
+		tokens[i] = `"` + t + `"`
+	}
 	return strings.Join(tokens, " ")
 }
 
@@ -40,6 +51,7 @@ type SearchCmd struct {
 	Limit          int     `       help:"Max results."                                                                                 short:"l" default:"20"`
 	After          string  `       help:"Only results after this date (YYYY-MM-DD)."                                                   short:"a"`
 	Before         string  `       help:"Only results before this date (YYYY-MM-DD)."                                                  short:"b"`
+	Exact          bool    `       help:"Match the query as an exact phrase (adjacent words, in order)."                               short:"e"                     name:"exact"`
 	Semantic       bool    `       help:"Use semantic (vector) search."                                                                                              name:"semantic"`
 	Hybrid         bool    `       help:"Combine FTS5 and semantic search."                                                                                          name:"hybrid"`
 	Sort           string  `       help:"Sort order: relevance (default) or recent."                                                             default:"relevance"                        enum:"relevance,recent"`
@@ -69,7 +81,7 @@ func (cmd *SearchCmd) Run(rc *RunContext) error {
 
 // runFTS performs a standard FTS5/BM25 search.
 func (cmd *SearchCmd) runFTS(rc *RunContext) error {
-	match := ftsQuery(cmd.Query)
+	match := ftsQuery(cmd.Query, cmd.Exact)
 	if match == "" {
 		return cmd.printResults(rc, nil)
 	}
@@ -290,7 +302,7 @@ func (cmd *SearchCmd) runHybrid(rc *RunContext) error {
 
 // ftsResults returns FTS search results as a slice (for hybrid merging).
 func (cmd *SearchCmd) ftsResults(rc *RunContext) ([]SearchResult, error) {
-	match := ftsQuery(cmd.Query)
+	match := ftsQuery(cmd.Query, cmd.Exact)
 	if match == "" {
 		return nil, nil
 	}
@@ -558,9 +570,13 @@ func (cmd *SearchCmd) printResults(rc *RunContext, results []SearchResult) error
 		sg.hits = append(sg.hits, r)
 	}
 
-	// Within each session, order hits by timestamp ascending; order sessions
-	// within a project by their earliest hit's timestamp; order projects by
-	// their most recent hit (recency-first).
+	// Oldest-first at every grouping level so the whole result reads
+	// chronologically top-to-bottom: hits within a session by timestamp
+	// ascending, sessions within a project by their earliest hit, and projects
+	// against each other by their earliest hit.
+	earliest := func(sg *sessionGroup) string {
+		return sg.hits[0].Timestamp // valid: hits sorted ascending in the loop below
+	}
 	for _, pg := range projects {
 		for _, sg := range pg.sessions {
 			sort.Slice(sg.hits, func(i, j int) bool {
@@ -568,21 +584,20 @@ func (cmd *SearchCmd) printResults(rc *RunContext, results []SearchResult) error
 			})
 		}
 		sort.SliceStable(pg.sessions, func(i, j int) bool {
-			return pg.sessions[i].hits[0].Timestamp < pg.sessions[j].hits[0].Timestamp
+			return earliest(pg.sessions[i]) < earliest(pg.sessions[j])
 		})
 	}
-	latest := func(pg *projectGroup) string {
-		var ts string
+	projectEarliest := func(pg *projectGroup) string {
+		ts := ""
 		for _, sg := range pg.sessions {
-			last := sg.hits[len(sg.hits)-1].Timestamp
-			if last > ts {
-				ts = last
+			if first := earliest(sg); ts == "" || first < ts {
+				ts = first
 			}
 		}
 		return ts
 	}
 	sort.SliceStable(projects, func(i, j int) bool {
-		return latest(projects[i]) > latest(projects[j])
+		return projectEarliest(projects[i]) < projectEarliest(projects[j])
 	})
 
 	for i, pg := range projects {
