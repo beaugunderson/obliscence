@@ -13,6 +13,7 @@ var cli struct {
 	Profile string `help:"Write CPU profile to file." hidden:""`
 
 	Index       IndexCmd       `cmd:"" help:"Index new/changed sessions."`
+	Import      ImportCmd      `cmd:"" help:"Import a claude.ai data export (.zip) and index it idempotently."`
 	Search      SearchCmd      `cmd:"" help:"Search conversations."`
 	Corrections CorrectionsCmd `cmd:"" help:"Find user messages that correct or push back on the assistant."`
 	Sessions    SessionsCmd    `cmd:"" help:"List sessions."`

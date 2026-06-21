@@ -17,6 +17,7 @@ Flat structure, single package. Each file maps to a concern:
 - `main.go` — kong CLI dispatch
 - `db.go` — SQLite schema, open, RunContext
 - `index.go` — JSONL parsing, incremental indexing, embedding generation
+- `import.go` — claude.ai data-export ingestion (zip/dir/conversations.json → sessions/messages, idempotent via uuid keys + upsert); shares the embed pass with `index`
 - `search.go` — FTS5 search, semantic search, hybrid (RRF) search
 - `corrections.go` — lexical detector for user messages that correct/push back on the assistant
 - `sessions.go` — sessions/show/stats/projects/resume commands

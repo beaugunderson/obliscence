@@ -28,6 +28,7 @@ Requires CGo (mattn/go-sqlite3 + daulet/tokenizers). The Makefile auto-downloads
 obliscence setup              # Download models, install hooks + skill
 obliscence uninstall          # Remove hooks, skill, and downloaded models
 obliscence index              # Index new/changed sessions
+obliscence import <export.zip> # Import a claude.ai data export (idempotent)
 obliscence search "query"     # Full-text search (BM25)
 obliscence search --semantic  # Vector similarity search
 obliscence search --hybrid    # FTS5 + semantic via reciprocal rank fusion
@@ -38,6 +39,16 @@ obliscence resume <session-id> # Resume a session in Claude Code
 obliscence projects           # List all projects
 obliscence stats              # Database statistics
 ```
+
+### Importing claude.ai chats
+
+Claude Code sessions are indexed automatically. To also search your **claude.ai** web chats, export them (claude.ai → Settings → Privacy → Export data — you're emailed a zip) and import:
+
+```
+obliscence import ~/Downloads/data-*.zip
+```
+
+Accepts a `.zip`, an extracted export directory, or a `conversations.json`. Idempotent — each conversation/message keys on its claude.ai uuid, so re-importing the same export (or a newer, overlapping one) only adds what's new. Imported chats land under the `claude.ai` project (filter with `search -p claude.ai`).
 
 ### Search flags
 

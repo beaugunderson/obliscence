@@ -47,15 +47,18 @@ func ftsQuery(raw string, exact bool) string {
 type SearchCmd struct {
 	Query          string  `arg:"" help:"Search query."`
 	Project        string  `       help:"Filter by project name."                                                                      short:"p"`
+	Source         string  `       help:"Filter by provenance: 'claude.ai' or 'local' (claude_code)."                                            name:"source"`
 	Role           string  `       help:"Filter by role (user, assistant)."                                                            short:"r"`
-	Limit          int     `       help:"Max results."                                                                                 short:"l" default:"20"`
+	Limit          int     `       help:"Max results."                                                                                 short:"l"                        default:"20"`
 	After          string  `       help:"Only results after this date (YYYY-MM-DD)."                                                   short:"a"`
 	Before         string  `       help:"Only results before this date (YYYY-MM-DD)."                                                  short:"b"`
-	Exact          bool    `       help:"Match the query as an exact phrase (adjacent words, in order)."                               short:"e"                     name:"exact"`
-	Semantic       bool    `       help:"Use semantic (vector) search."                                                                                              name:"semantic"`
-	Hybrid         bool    `       help:"Combine FTS5 and semantic search."                                                                                          name:"hybrid"`
-	Sort           string  `       help:"Sort order: relevance (default) or recent."                                                             default:"relevance"                        enum:"relevance,recent"`
-	SemanticWeight float64 `       help:"Hybrid: weight semantic results relative to keyword (>1 favors semantic/conceptual matches)."           default:"1.0"       name:"semantic-weight"`
+	Exact          bool    `       help:"Match the query as an exact phrase (adjacent words, in order)."                               short:"e" name:"exact"`
+	Semantic       bool    `       help:"Use semantic (vector) search."                                                                          name:"semantic"`
+	Hybrid         bool    `       help:"Combine FTS5 and semantic search."                                                                      name:"hybrid"`
+	Sort           string  `       help:"Sort order: relevance (default) or recent."                                                                                    default:"relevance" enum:"relevance,recent"`
+	SemanticWeight float64 `       help:"Hybrid: weight semantic results relative to keyword (>1 favors semantic/conceptual matches)."           name:"semantic-weight" default:"1.0"`
+
+	prov string // resolved provenance filter, validated in Run
 }
 
 type SearchResult struct {
@@ -70,6 +73,12 @@ type SearchResult struct {
 }
 
 func (cmd *SearchCmd) Run(rc *RunContext) error {
+	prov, err := normalizeProvenance(cmd.Source)
+	if err != nil {
+		return err
+	}
+	cmd.prov = prov
+
 	if cmd.Hybrid {
 		return cmd.runHybrid(rc)
 	}
@@ -107,6 +116,10 @@ func (cmd *SearchCmd) runFTS(rc *RunContext) error {
 	if cmd.Before != "" {
 		where = append(where, "m.timestamp <= ?")
 		args = append(args, cmd.Before)
+	}
+	if cmd.prov != "" {
+		where = append(where, "s.provenance = ?")
+		args = append(args, cmd.prov)
 	}
 
 	orderBy := "score"
@@ -206,6 +219,28 @@ func (cmd *SearchCmd) filterResults(results []SearchResult) []SearchResult {
 		filtered = append(filtered, r)
 	}
 	return filtered
+}
+
+// normalizeProvenance maps a user-supplied --source value onto a stored
+// provenance value ("claude_code" / "claude_ai"). Empty input means no filter.
+// An unrecognized value is an error that names the valid options, so a calling
+// agent gets actionable feedback.
+func normalizeProvenance(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return "", nil
+	case "claude_ai", "claude.ai", "claudeai", "ai", "web":
+		return "claude_ai", nil
+	case "claude_code", "claudecode", "code", "local", "cc":
+		return "claude_code", nil
+	default:
+		return "", fmt.Errorf(
+			"invalid --source %q; valid values: %q (aliases: claude.ai, ai, web) or %q (aliases: local, code, cc)",
+			s,
+			"claude_ai",
+			"claude_code",
+		)
+	}
 }
 
 // runHybrid merges FTS5 and semantic results via reciprocal rank fusion.
@@ -329,6 +364,10 @@ func (cmd *SearchCmd) ftsResults(rc *RunContext) ([]SearchResult, error) {
 		where = append(where, "m.timestamp <= ?")
 		args = append(args, cmd.Before)
 	}
+	if cmd.prov != "" {
+		where = append(where, "s.provenance = ?")
+		args = append(args, cmd.prov)
+	}
 
 	orderBy := "score"
 	if cmd.Sort == "recent" {
@@ -422,11 +461,16 @@ func (cmd *SearchCmd) semanticResults(
 		placeholders[i] = "?"
 		idArgs[i] = h.rowid
 	}
+	provClause := ""
+	if cmd.prov != "" {
+		provClause = " AND s.provenance = ?"
+		idArgs = append(idArgs, cmd.prov)
+	}
 	dataRows, err := rc.DB.Query(fmt.Sprintf(`
 		SELECT m.rowid, m.id, m.session_id, s.project_name, m.role, m.timestamp, m.content, s.git_branch
 		FROM messages m
 		JOIN sessions s ON s.id = m.session_id
-		WHERE m.rowid IN (%s)`, strings.Join(placeholders, ",")), idArgs...)
+		WHERE m.rowid IN (%s)%s`, strings.Join(placeholders, ","), provClause), idArgs...)
 	if err != nil {
 		return nil, err
 	}

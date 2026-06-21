@@ -207,6 +207,12 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 }
 
 func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
+	return embedUnembedded(rc, embedder, cmd.Verbose)
+}
+
+// embedUnembedded generates embeddings for any message that lacks them,
+// regardless of source. Shared by `index` and `import`.
+func embedUnembedded(rc *RunContext, embedder *Embedder, verbose bool) error {
 	// Count messages needing embeddings.
 	// Use embedded_messages tracking table instead of LEFT JOIN on vec0 virtual table
 	// (vec0 JOINs are extremely slow).
@@ -258,7 +264,7 @@ func (cmd *IndexCmd) embedPass(rc *RunContext, embedder *Embedder) error {
 	}
 	rows.Close()
 
-	showProgress := isTTY && !cmd.Verbose && !rc.JSON
+	showProgress := isTTY && !verbose && !rc.JSON
 	start := time.Now()
 	var done int
 
@@ -447,8 +453,8 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 		return nil, err
 	}
 	s.insertSession, err = tx.Prepare(`
-		INSERT INTO sessions (id, project_path, project_name, model, git_branch, started_at, updated_at, source_path, source_mtime, source_size)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		INSERT INTO sessions (id, project_path, project_name, model, git_branch, started_at, updated_at, source_path, source_mtime, source_size, provenance)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claude_code')`)
 	if err != nil {
 		return nil, err
 	}

@@ -48,6 +48,20 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Add the provenance column to older DBs, and stamp already-imported
+	// claude.ai sessions (which were marked via project_name before this column).
+	if added, err := ensureColumn(
+		db, "sessions", "provenance", "TEXT NOT NULL DEFAULT 'claude_code'",
+	); err != nil {
+		return err
+	} else if added {
+		if _, err := db.Exec(
+			"UPDATE sessions SET provenance = 'claude_ai' WHERE project_name = 'claude.ai'",
+		); err != nil {
+			return err
+		}
+	}
+
 	// Migrate the vector store when the embedding model/layout changes. All old
 	// vectors are invalid across models, so drop and recreate the vec table and
 	// clear the embedding-tracking table to force a full re-embed on next index.
@@ -100,6 +114,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     project_path TEXT NOT NULL,
     project_name TEXT NOT NULL,
+    provenance TEXT NOT NULL DEFAULT 'claude_code',
     model TEXT,
     git_branch TEXT,
     started_at TEXT,
@@ -197,4 +212,35 @@ func expandPath(p string) string {
 // dirOf returns the directory component of a path.
 func dirOf(p string) string {
 	return filepath.Dir(p)
+}
+
+// ensureColumn adds a column to a table if it's not already present, returning
+// whether it was added. Used for lightweight schema migrations on existing DBs.
+func ensureColumn(db *sql.DB, table, col, def string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == col {
+			return false, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	rows.Close()
+	if _, err := db.Exec(
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, col, def),
+	); err != nil {
+		return false, err
+	}
+	return true, nil
 }
