@@ -54,14 +54,55 @@ func (cmd *ResumeCmd) Run(rc *RunContext) error {
 		return fmt.Errorf("claude not found in PATH")
 	}
 
-	fmt.Fprintf(os.Stderr, "resuming %s in %s\n", dim(sessionID), bold(filepath.Base(projectPath)))
+	// A session lives under the Claude profile whose projects/ dir holds its
+	// transcript (~/.claude, ~/.claude-personal, ...). Point Claude Code at that
+	// profile via CLAUDE_CONFIG_DIR so --resume finds the session and reads the
+	// matching settings, regardless of which profile the current shell defaults to.
+	configDir := claudeConfigDir(sourcePath)
+
+	if configDir != "" && configDir != defaultConfigDir() {
+		fmt.Fprintf(os.Stderr, "resuming %s in %s (%s)\n",
+			dim(sessionID), bold(filepath.Base(projectPath)), dim(filepath.Base(configDir)))
+	} else {
+		fmt.Fprintf(
+			os.Stderr,
+			"resuming %s in %s\n",
+			dim(sessionID),
+			bold(filepath.Base(projectPath)),
+		)
+	}
 
 	c := exec.Command(claudePath, "--resume", sessionID)
 	c.Dir = projectPath
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
+	if configDir != "" {
+		c.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+configDir)
+	}
 	return c.Run()
+}
+
+// claudeConfigDir derives the Claude Code config directory that owns a session
+// transcript from its source path. Transcripts live at
+// <configDir>/projects/<projectKey>/<uuid>.jsonl, so the config dir is three
+// levels up. Returns "" if the path doesn't have that shape.
+func claudeConfigDir(sourcePath string) string {
+	projectsDir := filepath.Dir(filepath.Dir(sourcePath))
+	if filepath.Base(projectsDir) != "projects" {
+		return ""
+	}
+	return filepath.Dir(projectsDir)
+}
+
+// defaultConfigDir returns ~/.claude, the profile Claude Code uses when
+// CLAUDE_CONFIG_DIR is unset.
+func defaultConfigDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
 }
 
 // resolveWorktreePath converts a worktree path like
