@@ -56,8 +56,8 @@ func (cmd *ResumeCmd) Run(rc *RunContext) error {
 
 	// A session lives under the Claude profile whose projects/ dir holds its
 	// transcript (~/.claude, ~/.claude-personal, ...). Point Claude Code at that
-	// profile via CLAUDE_CONFIG_DIR so --resume finds the session and reads the
-	// matching settings, regardless of which profile the current shell defaults to.
+	// profile via CLAUDE_CONFIG_DIR so --resume finds the session, regardless of
+	// which profile the current shell defaults to.
 	configDir := claudeConfigDir(sourcePath)
 
 	if configDir != "" && configDir != defaultConfigDir() {
@@ -77,10 +77,38 @@ func (cmd *ResumeCmd) Run(rc *RunContext) error {
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
-	if configDir != "" {
-		c.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+configDir)
-	}
+	c.Env = resumeEnv(os.Environ(), configDir)
 	return c.Run()
+}
+
+// resumeEnv builds the environment for the spawned `claude --resume`. A
+// non-default profile is injected as CLAUDE_CONFIG_DIR. The default profile
+// (~/.claude) instead strips any inherited CLAUDE_CONFIG_DIR so Claude Code
+// falls back to ~/.claude and its ~/.claude.json machine state at the home
+// root — setting CLAUDE_CONFIG_DIR=~/.claude would make it read
+// ~/.claude/.claude.json instead. An undeterminable profile leaves the
+// inherited environment untouched.
+func resumeEnv(base []string, configDir string) []string {
+	if configDir == "" {
+		return base
+	}
+	stripped := removeEnv(base, "CLAUDE_CONFIG_DIR")
+	if configDir == defaultConfigDir() {
+		return stripped
+	}
+	return append(stripped, "CLAUDE_CONFIG_DIR="+configDir)
+}
+
+// removeEnv returns env with any "key=..." entry removed.
+func removeEnv(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, prefix) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // claudeConfigDir derives the Claude Code config directory that owns a session

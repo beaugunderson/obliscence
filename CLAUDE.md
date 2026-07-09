@@ -39,7 +39,7 @@ Flat structure, single package. Each file maps to a concern:
 - DynamicAdvancedSession reuses the ONNX session across embed calls
 - Incremental indexing via `indexed_files` table tracking mtime + size
 - Every `~/.claude*/projects` directory is indexed (`.claude`, `.claude-personal`, `.claude-teams`, ...), auto-discovered by glob so a new profile needs no config. Sessions key on UUID and files on absolute path, so roots coexist without collision. Only `<root>/<project>/*.jsonl` is scanned — nested `subagents/agent-*.jsonl` transcripts are excluded
-- `resume` derives the owning profile from the session's `source_path` (the dir above `projects/`) and sets `CLAUDE_CONFIG_DIR` when launching `claude --resume`, so a `.claude-personal`/`.claude-teams` session resumes against its own profile
+- `resume` derives the owning profile from the session's `source_path` (the dir above `projects/`) when launching `claude --resume`. A non-default profile is passed as `CLAUDE_CONFIG_DIR`; the default `~/.claude` instead strips any inherited `CLAUDE_CONFIG_DIR` so Claude Code falls back to `~/.claude` and its `~/.claude.json` machine state (setting `CLAUDE_CONFIG_DIR=~/.claude` would wrongly redirect it to `~/.claude/.claude.json`)
 - Project name derived from `cwd` field in JSONL messages (`filepath.Base(cwd)`)
 - Hook handler swallows all errors to avoid Claude Code's false "hook error" label bug
 - User + assistant messages indexed; tool output excluded (too noisy)
