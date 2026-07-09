@@ -111,11 +111,11 @@ func (cmd *SearchCmd) runFTS(rc *RunContext) error {
 	}
 	if cmd.After != "" {
 		where = append(where, "m.timestamp >= ?")
-		args = append(args, cmd.After)
+		args = append(args, afterBound(cmd.After))
 	}
 	if cmd.Before != "" {
 		where = append(where, "m.timestamp <= ?")
-		args = append(args, cmd.Before)
+		args = append(args, beforeBound(cmd.Before))
 	}
 	if cmd.prov != "" {
 		where = append(where, "s.provenance = ?")
@@ -210,10 +210,10 @@ func (cmd *SearchCmd) filterResults(results []SearchResult) []SearchResult {
 		if cmd.Role != "" && r.Role != cmd.Role {
 			continue
 		}
-		if cmd.After != "" && r.Timestamp < cmd.After {
+		if cmd.After != "" && r.Timestamp < afterBound(cmd.After) {
 			continue
 		}
-		if cmd.Before != "" && r.Timestamp > cmd.Before {
+		if cmd.Before != "" && r.Timestamp > beforeBound(cmd.Before) {
 			continue
 		}
 		filtered = append(filtered, r)
@@ -358,11 +358,11 @@ func (cmd *SearchCmd) ftsResults(rc *RunContext) ([]SearchResult, error) {
 	}
 	if cmd.After != "" {
 		where = append(where, "m.timestamp >= ?")
-		args = append(args, cmd.After)
+		args = append(args, afterBound(cmd.After))
 	}
 	if cmd.Before != "" {
 		where = append(where, "m.timestamp <= ?")
-		args = append(args, cmd.Before)
+		args = append(args, beforeBound(cmd.Before))
 	}
 	if cmd.prov != "" {
 		where = append(where, "s.provenance = ?")

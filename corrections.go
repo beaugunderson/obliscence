@@ -167,11 +167,11 @@ func (cmd *CorrectionsCmd) Run(rc *RunContext) error {
 	}
 	if cmd.After != "" {
 		where = append(where, "m.timestamp >= ?")
-		args = append(args, cmd.After)
+		args = append(args, afterBound(cmd.After))
 	}
 	if cmd.Before != "" {
 		where = append(where, "m.timestamp <= ?")
-		args = append(args, cmd.Before)
+		args = append(args, beforeBound(cmd.Before))
 	}
 
 	rows, err := rc.DB.Query(fmt.Sprintf(`
@@ -232,7 +232,7 @@ func (cmd *CorrectionsCmd) Run(rc *RunContext) error {
 
 func (cmd *CorrectionsCmd) print(rc *RunContext, results []SearchResult) error {
 	if rc.JSON {
-		return printJSON(results)
+		return printResults(results)
 	}
 	if len(results) == 0 {
 		fmt.Println("no corrections found")

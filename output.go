@@ -68,6 +68,38 @@ func printJSON(v any) error {
 	return enc.Encode(v)
 }
 
+// printResults emits a result slice as JSON, encoding an empty result set as
+// `[]` rather than `null` so downstream consumers can always parse an array.
+func printResults(results []SearchResult) error {
+	if results == nil {
+		results = []SearchResult{}
+	}
+	return printJSON(results)
+}
+
+// afterBound and beforeBound normalize a bare YYYY-MM-DD date filter into a
+// timestamp comparison that includes the entire named day. Timestamps are
+// stored as full ISO-8601 strings (e.g. 2026-06-13T07:31:55.941Z), so a naive
+// `timestamp <= '2026-06-13'` excludes all of June 13. A full timestamp (or any
+// value already carrying a time component) is returned unchanged.
+func afterBound(s string) string {
+	if isBareDate(s) {
+		return s + "T00:00:00.000Z"
+	}
+	return s
+}
+
+func beforeBound(s string) string {
+	if isBareDate(s) {
+		return s + "T23:59:59.999Z"
+	}
+	return s
+}
+
+func isBareDate(s string) bool {
+	return len(s) == 10 && s[4] == '-' && s[7] == '-'
+}
+
 // truncate shortens s to maxLen, appending "..." if truncated.
 func truncate(s string, maxLen int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
