@@ -20,8 +20,38 @@ type IndexCmd struct {
 	NoEmbed bool   `help:"Skip embedding generation."                    name:"no-embed"`
 }
 
+// claudeRoots returns every Claude Code "projects" directory to index. Claude
+// Code keeps each install/profile under a sibling of ~/.claude (~/.claude,
+// ~/.claude-personal, ~/.claude-teams, ...), all matching ~/.claude*/projects.
+// Any such directory that exists is included, so a new profile is picked up
+// without configuration.
+func claudeRoots() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return claudeRootsUnder(home)
+}
+
+// claudeRootsUnder globs home for ".claude*/projects" directories, returning
+// only those that exist as directories. Split from claudeRoots so tests can
+// point it at a temp home.
+func claudeRootsUnder(home string) []string {
+	matches, _ := filepath.Glob(filepath.Join(home, ".claude*", "projects"))
+	var roots []string
+	for _, m := range matches {
+		if info, err := os.Stat(m); err == nil && info.IsDir() {
+			roots = append(roots, m)
+		}
+	}
+	return roots
+}
+
 func (cmd *IndexCmd) Run(rc *RunContext) error {
-	projectsDir := expandPath("~/.claude/projects")
+	roots := claudeRoots()
+	if len(roots) == 0 {
+		return fmt.Errorf("no Claude projects directories found under ~/.claude*")
+	}
 
 	// Initialize embedder if available and not disabled.
 	var embedder *Embedder
@@ -43,12 +73,12 @@ func (cmd *IndexCmd) Run(rc *RunContext) error {
 	}
 
 	if cmd.Session != "" {
-		return cmd.indexSession(rc, projectsDir)
+		return cmd.indexSession(rc, roots)
 	}
-	return cmd.indexAll(rc, projectsDir, embedder)
+	return cmd.indexAll(rc, roots, embedder)
 }
 
-func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embedder) error {
+func (cmd *IndexCmd) indexAll(rc *RunContext, roots []string, embedder *Embedder) error {
 	if cmd.Force {
 		if _, err := rc.DB.Exec("DELETE FROM indexed_files"); err != nil {
 			return fmt.Errorf("clearing index state: %w", err)
@@ -56,11 +86,6 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 		if cmd.Verbose {
 			fmt.Fprintln(os.Stderr, "cleared index state, forcing full reindex")
 		}
-	}
-
-	entries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		return fmt.Errorf("reading projects dir: %w", err)
 	}
 
 	// Load all indexed file states into memory to avoid per-file DB queries.
@@ -76,10 +101,17 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, projectsDir string, embedder *Embe
 		changed []string
 	}
 
+	// Gather the project subdirectories across every Claude root.
 	var dirs []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			dirs = append(dirs, filepath.Join(projectsDir, entry.Name()))
+	for _, root := range roots {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return fmt.Errorf("reading projects dir %s: %w", root, err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				dirs = append(dirs, filepath.Join(root, entry.Name()))
+			}
 		}
 	}
 
@@ -354,11 +386,14 @@ func printProgress(label string, done, total int, start time.Time) {
 		label, bar, done, total, pct*100, eta)
 }
 
-func (cmd *IndexCmd) indexSession(rc *RunContext, projectsDir string) error {
-	pattern := filepath.Join(projectsDir, "*", cmd.Session+".jsonl")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return err
+func (cmd *IndexCmd) indexSession(rc *RunContext, roots []string) error {
+	var matches []string
+	for _, root := range roots {
+		m, err := filepath.Glob(filepath.Join(root, "*", cmd.Session+".jsonl"))
+		if err != nil {
+			return err
+		}
+		matches = append(matches, m...)
 	}
 	if len(matches) == 0 {
 		return fmt.Errorf("session %s not found", cmd.Session)

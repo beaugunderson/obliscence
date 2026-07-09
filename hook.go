@@ -49,22 +49,22 @@ func (cmd *HookCmd) Run(rc *RunContext) error {
 	}
 
 	if input.SessionID != "" {
-		projectsDir := expandPath("~/.claude/projects")
-
-		// Try direct glob match.
-		pattern := filepath.Join(projectsDir, "*", input.SessionID+".jsonl")
-		if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
-			_ = indexSingleFile(rc.DB, matches[0])
-			return nil
-		}
-
-		// Try encoding cwd to find the project dir.
-		if input.CWD != "" {
-			encoded := encodePath(input.CWD)
-			path := filepath.Join(projectsDir, encoded, input.SessionID+".jsonl")
-			if _, err := os.Stat(path); err == nil {
-				_ = indexSingleFile(rc.DB, path)
+		for _, projectsDir := range claudeRoots() {
+			// Try direct glob match.
+			pattern := filepath.Join(projectsDir, "*", input.SessionID+".jsonl")
+			if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+				_ = indexSingleFile(rc.DB, matches[0])
 				return nil
+			}
+
+			// Try encoding cwd to find the project dir.
+			if input.CWD != "" {
+				encoded := encodePath(input.CWD)
+				path := filepath.Join(projectsDir, encoded, input.SessionID+".jsonl")
+				if _, err := os.Stat(path); err == nil {
+					_ = indexSingleFile(rc.DB, path)
+					return nil
+				}
 			}
 		}
 	}

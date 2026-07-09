@@ -38,6 +38,7 @@ Flat structure, single package. Each file maps to a concern:
 - `embedSchemaVersion` (PRAGMA user_version) gates a re-embed: bump it when the model/pooling/vec layout changes and the next `index` re-embeds everything
 - DynamicAdvancedSession reuses the ONNX session across embed calls
 - Incremental indexing via `indexed_files` table tracking mtime + size
+- Every `~/.claude*/projects` directory is indexed (`.claude`, `.claude-personal`, `.claude-teams`, ...), auto-discovered by glob so a new profile needs no config. Sessions key on UUID and files on absolute path, so roots coexist without collision. Only `<root>/<project>/*.jsonl` is scanned — nested `subagents/agent-*.jsonl` transcripts are excluded
 - Project name derived from `cwd` field in JSONL messages (`filepath.Base(cwd)`)
 - Hook handler swallows all errors to avoid Claude Code's false "hook error" label bug
 - User + assistant messages indexed; tool output excluded (too noisy)
