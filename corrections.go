@@ -232,7 +232,7 @@ func (cmd *CorrectionsCmd) Run(rc *RunContext) error {
 
 func (cmd *CorrectionsCmd) print(rc *RunContext, results []SearchResult) error {
 	if rc.JSON {
-		return printResults(results)
+		return printResultsJSON(results)
 	}
 	if len(results) == 0 {
 		fmt.Println("no corrections found")

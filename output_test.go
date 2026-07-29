@@ -29,21 +29,32 @@ func TestDateBounds(t *testing.T) {
 	}
 }
 
+// TestPrintResultsEmptyIsArray covers both JSON emitters — a bare `null` breaks
+// any consumer that iterates the output.
 func TestPrintResultsEmptyIsArray(t *testing.T) {
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	var results []SearchResult // nil
-	err := printResults(results)
-	w.Close()
-	os.Stdout = old
-	if err != nil {
-		t.Fatal(err)
+	emitters := map[string]func() error{
+		"printResultsJSON": func() error { return printResultsJSON(nil) },
+		"search": func() error {
+			return (&SearchCmd{}).printResults(&RunContext{JSON: true}, nil)
+		},
 	}
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-	var parsed []any
-	if e := json.Unmarshal(buf.Bytes(), &parsed); e != nil {
-		t.Fatalf("empty result did not parse as JSON array: %v (got %q)", e, buf.String())
+	for name, emit := range emitters {
+		t.Run(name, func(t *testing.T) {
+			old := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+			err := emit()
+			w.Close()
+			os.Stdout = old
+			if err != nil {
+				t.Fatal(err)
+			}
+			var buf bytes.Buffer
+			io.Copy(&buf, r)
+			var parsed []any
+			if e := json.Unmarshal(buf.Bytes(), &parsed); e != nil {
+				t.Fatalf("empty result did not parse as JSON array: %v (got %q)", e, buf.String())
+			}
+		})
 	}
 }

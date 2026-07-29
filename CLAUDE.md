@@ -32,6 +32,11 @@ Flat structure, single package. Each file maps to a concern:
 - FTS5 with Porter stemming + BM25 for keyword search; `search -e/--exact` wraps the query tokens in one FTS5 phrase so they must be adjacent and in order (default ANDs the tokens at any distance)
 - Grouped (non-JSON) search output is fully chronological: hits within a session, sessions within a project, and projects against each other all sort by timestamp ascending, so the result reads top-to-bottom in the order work happened
 - sqlite-vec with snowflake-arctic-embed-s (384-dim, CLS pooling) for semantic search
+- Scope flags (`--project`, `--role`, `--after`, `--before`, `--source`) come from one builder in `filterClauses` and constrain each retrieval branch's candidate set before ranking or fusion. Filtering a branch's results instead would let excluded rows spend its top-k slots, shrinking a scoped search's output without saying so
+  - vec0 rejects a WHERE constraint on an auxiliary column, so the KNN query resolves the filters to chunk rowids in a `rowid IN (...)` prefilter, reading the auxiliary columns back through a MATERIALIZED CTE the planner cannot push the join into. Costs ~350ms on ~140k chunks, only when a flag is set
+  - sqlite-vec caps KNN `k` at 4096 (`maxVecK`); a `--limit` whose candidate pool exceeds it is an error naming the cap
+- A flag a mode cannot act on is rejected in `validate`, never ignored: `--exact` with `--semantic`, `--semantic-weight` without `--hybrid`, `--semantic` with `--hybrid`. A silently dropped scope answers a different question than the one asked, and the results look right
+- `--sort=recent` orders all matches by timestamp in keyword mode; in semantic/hybrid it orders the relevance pool, since similarity search has no match/no-match boundary to enumerate
 - Asymmetric retrieval: queries get a prefix (`EmbedQuery`), documents do not (`EmbedDocument`)
 - Long messages are chunked into overlapping windows; each chunk is a separate vec row, deduped to the nearest chunk per message at search time. Snippet is the matching chunk
 - Tokenizer (`tokenizer.json`) is downloaded once at setup and loaded from disk — never per-embed over the network

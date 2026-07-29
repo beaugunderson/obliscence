@@ -58,12 +58,18 @@ Accepts a `.zip`, an extracted export directory, or a `conversations.json`. Idem
 --limit, -l     Max results (default 20)
 --after, -a     Results after date (YYYY-MM-DD)
 --before, -b    Results before date (YYYY-MM-DD)
+--source        Filter by provenance: claude.ai or local
+--exact, -e     Match the query as a phrase (keyword and hybrid only)
 --semantic         Vector similarity search (requires setup)
 --hybrid           FTS5 + semantic via reciprocal rank fusion
 --semantic-weight  Hybrid: weight semantic results vs keyword (default 1.0; >1 favors conceptual matches)
 --sort             relevance (default) or recent
 --json             Machine-readable output
 ```
+
+`--project`, `--role`, `--after`, `--before`, and `--source` scope the candidate set in every mode, including the vector half of `--semantic` and `--hybrid`, so a scoped search ranks over the scoped rows and returns a full `--limit` worth of them. A flag a mode cannot act on is an error rather than a no-op: `--exact` needs the keyword matcher (use `--hybrid` to phrase-match its keyword half), `--semantic-weight` needs the two rankings `--hybrid` fuses, and `--semantic` and `--hybrid` are mutually exclusive.
+
+In `--semantic` and `--hybrid`, `--sort=recent` orders the most similar matches by recency — every message is a match at some distance, so recency is applied to the relevance pool. Keyword mode has a match/no-match boundary and orders every match by timestamp.
 
 ### Examples
 
@@ -116,7 +122,7 @@ obliscence corrections --project home-app --after 2026-05-01 --json
 | Full index (with embeddings) | ~1min for ~14k messages |
 | Incremental re-index | ~2s |
 | FTS5 search | instant |
-| Semantic search | ~1s |
+| Semantic search | ~0.5s (~0.8s scoped by project/role/date) |
 
 ## Incremental indexing
 

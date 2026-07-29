@@ -68,9 +68,9 @@ func printJSON(v any) error {
 	return enc.Encode(v)
 }
 
-// printResults emits a result slice as JSON, encoding an empty result set as
+// printResultsJSON emits a result slice as JSON, encoding an empty result set as
 // `[]` rather than `null` so downstream consumers can always parse an array.
-func printResults(results []SearchResult) error {
+func printResultsJSON(results []SearchResult) error {
 	if results == nil {
 		results = []SearchResult{}
 	}
