@@ -271,6 +271,7 @@ Search past Claude Code conversations using obliscence. Use ` + "`--json`" + ` f
 - **Keyword search** (default): Best when the user remembers specific terms, error messages, file names, or tool names.
 - **Semantic search** (` + "`--semantic`" + `): Best for conceptual queries like "how did we handle rate limiting". Finds results by meaning, not exact words.
 - **Hybrid search** (` + "`--hybrid`" + `): Best general-purpose choice when unsure. Combines keyword and semantic via reciprocal rank fusion.
+- **Exact phrase** (` + "`-e`" + `/` + "`--exact`" + `): Best when the user quotes a string they remember verbatim. The words must appear adjacent and in order; the default ANDs the tokens at any distance. Works with keyword and ` + "`--hybrid`" + `; pairing it with ` + "`--semantic`" + ` is an error, since there is no keyword matcher to constrain. Still case- and punctuation-insensitive (tokenized), so it narrows order/adjacency, not literal characters.
 
 ## Commands
 
@@ -284,6 +285,9 @@ obliscence search "$QUERY" --json
 # Semantic search (when query is conceptual/natural language)
 obliscence search "$QUERY" --semantic --json
 
+# Exact-phrase search (words adjacent and in order — for verbatim quotes)
+obliscence search "$QUERY" --exact --json
+
 # Filter by project
 obliscence search "$QUERY" --hybrid --project PROJECT_NAME --json
 
@@ -292,6 +296,9 @@ obliscence search "$QUERY" --hybrid --role user --json
 
 # Filter by date range
 obliscence search "$QUERY" --hybrid --after 2026-01-01 --before 2026-04-01 --json
+
+# Filter by where the conversation happened: claude.ai web chats vs local Claude Code
+obliscence search "$QUERY" --hybrid --source claude.ai --json
 
 # Sort by recency instead of relevance — use for "last time I mentioned X" queries
 # where the user wants the most recent match, not the most relevant one
@@ -333,7 +340,11 @@ Each result carries ` + "`session_id`" + ` and ` + "`message_id`" + `; pass ` + 
 - Start broad, then narrow with ` + "`--project`" + ` or ` + "`--role`" + ` filters.
 - Use ` + "`obliscence show SESSION_ID`" + ` to read the full conversation once you find a relevant result. Pass the ` + "`session_id`" + ` UUID from JSON output.
 - When the user says "we worked on X recently", add ` + "`--after`" + ` with a date ~2 weeks back.
-- For "the last time I…" / "find the most recent…" queries, use ` + "`--sort=recent`" + ` so the most recent matches surface even when older messages score higher on relevance.
+- Scope flags (` + "`--project`" + `, ` + "`--role`" + `, ` + "`--after`" + `/` + "`--before`" + `, ` + "`--source`" + `) constrain the candidate set in every mode, including the vector half of ` + "`--semantic`" + ` and ` + "`--hybrid`" + `. A bounded search ranks over the bounded rows and returns a full ` + "`--limit`" + ` of them, so trust the bound rather than re-reading timestamps.
+- For "the last time I…" / "find the most recent…" queries, prefer keyword ` + "`--sort=recent`" + `: it orders every match by timestamp, while ` + "`--semantic`" + `/` + "`--hybrid`" + ` order the most similar matches by recency, so a recent-but-less-similar hit can be missed. Narrowing with ` + "`--after`" + ` works in any mode.
+- Raise ` + "`--limit`" + ` (default 20) for a sweep like "everything we said about X"; the default is right for a single lookup.
+- When the user quotes an exact phrase ("find where I said '…'"), add ` + "`-e`" + `/` + "`--exact`" + ` so a loose token-AND match doesn't bury the verbatim hit.
+- Grouped (non-` + "`--json`" + `) output reads chronologically top-to-bottom — hits, sessions, and projects all sort oldest-first — so the result is the work narrative in the order it happened.
 `
 
 // installSkill writes the search-history skill to ~/.claude/skills/. The skill
