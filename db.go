@@ -183,6 +183,11 @@ END;
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+-- tool_uses.message_id is an ON DELETE CASCADE foreign key. Without an index
+-- on it, deleting one session makes SQLite scan the whole tool_uses table once
+-- per deleted message to find its children, which turns a session rebuild into
+-- hours on a long transcript.
+CREATE INDEX IF NOT EXISTS idx_tool_uses_message ON tool_uses(message_id);
 CREATE INDEX IF NOT EXISTS idx_tool_uses_session ON tool_uses(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_uses_name ON tool_uses(tool_name);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_name);
