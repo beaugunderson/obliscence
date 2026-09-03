@@ -3,9 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -270,11 +273,16 @@ func embedUnembedded(rc *RunContext, embedder *Embedder, verbose bool) error {
 		fmt.Fprintf(os.Stderr, "generating embeddings for %d messages...\n", total)
 	}
 
+	// Newest first. The backlog on a large archive is hours of work, and the
+	// messages worth reaching for semantically are the recent ones — embedding
+	// in rowid order leaves this week unsearchable until the whole history is
+	// done.
 	rows, err := rc.DB.Query(`
 		SELECT m.rowid, m.content
 		FROM messages m
 		WHERE m.rowid NOT IN (SELECT message_rowid FROM embedded_messages)
-		  AND length(trim(m.content)) >= 20`,
+		  AND length(trim(m.content)) >= 20
+		ORDER BY m.rowid DESC`,
 	)
 	if err != nil {
 		return err
@@ -321,6 +329,13 @@ func embedUnembedded(rc *RunContext, embedder *Embedder, verbose bool) error {
 			tx.Rollback()
 			return err
 		}
+		ownStmt, err := tx.Prepare(
+			"INSERT OR REPLACE INTO messages_vec_owner(vec_rowid, message_rowid) VALUES (?, ?)")
+		if err != nil {
+			vecStmt.Close()
+			tx.Rollback()
+			return err
+		}
 		trackStmt, err := tx.Prepare(
 			"INSERT OR IGNORE INTO embedded_messages(message_rowid) VALUES (?)")
 		if err != nil {
@@ -339,7 +354,18 @@ func embedUnembedded(rc *RunContext, embedder *Embedder, verbose bool) error {
 				if err != nil {
 					continue
 				}
-				_, _ = vecStmt.Exec(serialized, item.rowid, idx, ch.start, ch.end)
+				res, err := vecStmt.Exec(serialized, item.rowid, idx, ch.start, ch.end)
+				if err != nil {
+					continue
+				}
+				// Only claim the rowid when the insert actually happened —
+				// LastInsertId on an ignored INSERT reports the previous row.
+				if n, err := res.RowsAffected(); err != nil || n == 0 {
+					continue
+				}
+				if vrid, err := res.LastInsertId(); err == nil && vrid != 0 {
+					_, _ = ownStmt.Exec(vrid, item.rowid)
+				}
 			}
 			_, _ = trackStmt.Exec(item.rowid)
 			done++
@@ -349,6 +375,7 @@ func embedUnembedded(rc *RunContext, embedder *Embedder, verbose bool) error {
 		}
 
 		vecStmt.Close()
+		ownStmt.Close()
 		trackStmt.Close()
 		if err := tx.Commit(); err != nil {
 			return err
@@ -458,22 +485,41 @@ func needsIndexing(indexed map[string]fileState, path string) bool {
 
 // indexStmts holds pre-prepared statements for batch indexing.
 type indexStmts struct {
+	selectVecRowids  *sql.Stmt
 	deleteVec        *sql.Stmt
+	deleteVecOwner   *sql.Stmt
 	deleteEmbeddings *sql.Stmt
 	deleteSession    *sql.Stmt
 	insertSession    *sql.Stmt
 	insertMsg        *sql.Stmt
 	insertTool       *sql.Stmt
 	insertFile       *sql.Stmt
+	selectFileState  *sql.Stmt
+	sessionSource    *sql.Stmt
+	updateSession    *sql.Stmt
 }
 
 func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 	var s indexStmts
 	var err error
 
-	s.deleteVec, err = tx.Prepare(
-		"DELETE FROM messages_vec WHERE message_rowid IN (SELECT rowid FROM messages WHERE session_id = ?)",
-	)
+	// message_rowid is an auxiliary column of messages_vec, which sqlite-vec
+	// cannot filter on — matching against it full-scans the vector store and
+	// reads a blob per row. Resolve the vec rowids from the owner map instead
+	// and delete them one at a time, which vec0 treats as a point delete.
+	s.selectVecRowids, err = tx.Prepare(`
+		SELECT vec_rowid FROM messages_vec_owner
+		WHERE message_rowid IN (SELECT rowid FROM messages WHERE session_id = ?)`)
+	if err != nil {
+		return nil, err
+	}
+	s.deleteVec, err = tx.Prepare("DELETE FROM messages_vec WHERE rowid = ?")
+	if err != nil {
+		return nil, err
+	}
+	s.deleteVecOwner, err = tx.Prepare(`
+		DELETE FROM messages_vec_owner
+		WHERE message_rowid IN (SELECT rowid FROM messages WHERE session_id = ?)`)
 	if err != nil {
 		return nil, err
 	}
@@ -506,7 +552,25 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 		return nil, err
 	}
 	s.insertFile, err = tx.Prepare(
-		"INSERT OR REPLACE INTO indexed_files (path, mtime, size) VALUES (?, ?, ?)")
+		"INSERT OR REPLACE INTO indexed_files (path, mtime, size, head_sha) VALUES (?, ?, ?, ?)")
+	if err != nil {
+		return nil, err
+	}
+	s.selectFileState, err = tx.Prepare(
+		"SELECT size, head_sha FROM indexed_files WHERE path = ?")
+	if err != nil {
+		return nil, err
+	}
+	s.sessionSource, err = tx.Prepare(
+		"SELECT source_path FROM sessions WHERE id = ?")
+	if err != nil {
+		return nil, err
+	}
+	s.updateSession, err = tx.Prepare(`
+		UPDATE sessions
+		SET project_path = ?, project_name = ?, model = ?, git_branch = ?,
+			started_at = ?, updated_at = ?, source_path = ?, source_mtime = ?, source_size = ?
+		WHERE id = ?`)
 	if err != nil {
 		return nil, err
 	}
@@ -514,13 +578,18 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 }
 
 func (s *indexStmts) Close() {
+	s.selectVecRowids.Close()
 	s.deleteVec.Close()
+	s.deleteVecOwner.Close()
 	s.deleteEmbeddings.Close()
 	s.deleteSession.Close()
 	s.insertSession.Close()
 	s.insertMsg.Close()
 	s.insertTool.Close()
 	s.insertFile.Close()
+	s.selectFileState.Close()
+	s.sessionSource.Close()
+	s.updateSession.Close()
 }
 
 // indexFile parses a JSONL file and inserts its contents using pre-prepared statements.
@@ -533,6 +602,17 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 
 	info, err := f.Stat()
 	if err != nil {
+		return err
+	}
+
+	// Hash the head of the file so a transcript that has only been appended to
+	// can be told apart from one that was rewritten. Claude Code writes these
+	// append-only, so the common case by far is "same file, more lines".
+	head, err := headHash(f)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
 
@@ -607,7 +687,7 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 
 	if sess.id == "" {
 		// No session found, but record the file so we skip it next time.
-		_, _ = stmts.insertFile.Exec(path, mtime, info.Size())
+		_, _ = stmts.insertFile.Exec(path, mtime, info.Size(), head)
 		return nil
 	}
 
@@ -618,18 +698,40 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 		sess.projectName = dirName
 	}
 
-	// Delete existing data for this session (full re-index on change).
-	// Clean up vec table + tracking before cascade deletes messages.
-	_, _ = stmts.deleteVec.Exec(sess.id)
-	_, _ = stmts.deleteEmbeddings.Exec(sess.id)
-	_, _ = stmts.deleteSession.Exec(sess.id)
+	// Decide whether this is an append or a rewrite. Tearing the session down and
+	// rebuilding it costs a cascade delete of every message plus the FTS index
+	// work to unpick and re-add all of its text — minutes on a long transcript,
+	// repeated on every pass while the session is still being written to. When
+	// the file has only grown and its head is byte-for-byte what we indexed
+	// last time, the existing rows are still correct and INSERT OR IGNORE adds
+	// only what is new.
+	appendOnly := false
+	if head != "" {
+		var storedSize int64
+		var storedHead sql.NullString
+		if err := stmts.selectFileState.QueryRow(path).Scan(&storedSize, &storedHead); err == nil {
+			if storedHead.Valid && storedHead.String == head && info.Size() >= storedSize {
+				// The session must also still be owned by this exact file, or we
+				// would be merging two transcripts into one row.
+				var owner string
+				if err := stmts.sessionSource.QueryRow(sess.id).Scan(&owner); err == nil && owner == path {
+					appendOnly = true
+				}
+			}
+		}
+	}
 
-	_, err = stmts.insertSession.Exec(
-		sess.id, sess.projectPath, sess.projectName, sess.model, sess.gitBranch,
-		sess.startedAt, sess.updatedAt, path, mtime, info.Size(),
-	)
-	if err != nil {
-		return fmt.Errorf("inserting session: %w", err)
+	if appendOnly {
+		if _, err := stmts.updateSession.Exec(
+			sess.projectPath, sess.projectName, sess.model, sess.gitBranch,
+			sess.startedAt, sess.updatedAt, path, mtime, info.Size(), sess.id,
+		); err != nil {
+			return fmt.Errorf("updating session: %w", err)
+		}
+	} else {
+		if err := rebuildSession(stmts, &sess, path, mtime, info.Size()); err != nil {
+			return err
+		}
 	}
 
 	for _, m := range messages {
@@ -657,7 +759,7 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 	}
 
 	// Record file as indexed.
-	_, _ = stmts.insertFile.Exec(path, mtime, info.Size())
+	_, _ = stmts.insertFile.Exec(path, mtime, info.Size(), head)
 	return nil
 }
 
@@ -899,4 +1001,52 @@ func unquote(raw json.RawMessage) string {
 		return ""
 	}
 	return s
+}
+
+// headHash fingerprints the first bytes of a transcript. Two files with the same
+// head and a non-shrinking size are the same transcript, longer.
+func headHash(f *os.File) (string, error) {
+	buf := make([]byte, headHashBytes)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return "", err
+	}
+	if n == 0 {
+		return "", nil
+	}
+	sum := sha256.Sum256(buf[:n])
+	return hex.EncodeToString(sum[:]), nil
+}
+
+const headHashBytes = 64 * 1024
+
+// rebuildSession drops everything the index holds for a session and puts the
+// session row back. Only for a transcript that was rewritten rather than
+// appended to — it cascades a delete of every message, which is the expensive
+// half of indexing.
+func rebuildSession(stmts *indexStmts, sess *sessionMeta, path string, mtime float64, size int64) error {
+	if rows, err := stmts.selectVecRowids.Query(sess.id); err == nil {
+		var vecRowids []int64
+		for rows.Next() {
+			var vrid int64
+			if err := rows.Scan(&vrid); err == nil {
+				vecRowids = append(vecRowids, vrid)
+			}
+		}
+		rows.Close()
+		for _, vrid := range vecRowids {
+			_, _ = stmts.deleteVec.Exec(vrid)
+		}
+	}
+	_, _ = stmts.deleteVecOwner.Exec(sess.id)
+	_, _ = stmts.deleteEmbeddings.Exec(sess.id)
+	_, _ = stmts.deleteSession.Exec(sess.id)
+
+	if _, err := stmts.insertSession.Exec(
+		sess.id, sess.projectPath, sess.projectName, sess.model, sess.gitBranch,
+		sess.startedAt, sess.updatedAt, path, mtime, size,
+	); err != nil {
+		return fmt.Errorf("inserting session: %w", err)
+	}
+	return nil
 }
