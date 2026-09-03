@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,5 +91,36 @@ func TestFreshDBHasVecSchema(t *testing.T) {
 		vec,
 	); err != nil {
 		t.Errorf("fresh vec table missing chunk columns: %v", err)
+	}
+}
+
+// TestSessionDeleteCascadeIsIndexed guards the FK cascade from messages to
+// tool_uses. Without an index on tool_uses(message_id), every message deleted
+// during a session re-index runs a full scan of tool_uses, which turns a
+// re-index into hours on a large database.
+func TestSessionDeleteCascadeIsIndexed(t *testing.T) {
+	db, err := openDB(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query("EXPLAIN QUERY PLAN DELETE FROM messages WHERE session_id = 'x'")
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if strings.Contains(detail, "SCAN tool_uses") {
+			t.Fatalf(
+				"message delete cascade scans tool_uses: %q (missing index on tool_uses.message_id)",
+				detail,
+			)
+		}
 	}
 }

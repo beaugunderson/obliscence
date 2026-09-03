@@ -3,12 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,6 +88,14 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, roots []string, embedder *Embedder
 		}
 	}
 
+	pruned, err := pruneOrphanVectors(rc.DB)
+	if err != nil {
+		return fmt.Errorf("pruning orphan vectors: %w", err)
+	}
+	if pruned > 0 && cmd.Verbose {
+		fmt.Fprintf(os.Stderr, "pruned %d orphan vectors\n", pruned)
+	}
+
 	// Load all indexed file states into memory to avoid per-file DB queries.
 	indexedFiles, err := loadIndexedFiles(rc.DB)
 	if err != nil {
@@ -124,12 +129,8 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, roots []string, embedder *Embedder
 		wg.Add(1)
 		go func(i int, dir string) {
 			defer wg.Done()
-			jsonlFiles, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-			if err != nil {
-				return
-			}
 			var r scanResult
-			for _, path := range jsonlFiles {
+			for _, path := range sessionFiles(dir) {
 				r.all = append(r.all, path)
 				if needsIndexing(indexedFiles, path) {
 					r.changed = append(r.changed, path)
@@ -444,6 +445,42 @@ func (cmd *IndexCmd) indexSession(rc *RunContext, roots []string) error {
 	return tx.Commit()
 }
 
+// sessionFiles lists the session transcripts in one project directory.
+// Claude Code names a transcript after its session id. Subagent transcripts
+// (agent-*.jsonl, or under subagents/) are stamped with the parent's
+// sessionId, so they are not sessions of their own and are skipped.
+func sessionFiles(dir string) []string {
+	matches, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	var files []string
+	for _, path := range matches {
+		if isSessionTranscript(path) {
+			files = append(files, path)
+		}
+	}
+	return files
+}
+
+func isSessionTranscript(path string) bool {
+	return !strings.HasPrefix(filepath.Base(path), "agent-")
+}
+
+// sessionIDFromPath returns the session id encoded in a transcript's file
+// name, or "" when the name is not a UUID. The file name is authoritative: a
+// forked session's transcript starts with lines copied from its parent that
+// still carry the parent's sessionId.
+func sessionIDFromPath(path string) string {
+	stem := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	if len(stem) != 36 || strings.Count(stem, "-") != 4 {
+		return ""
+	}
+	for _, c := range stem {
+		if c != '-' && !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return ""
+		}
+	}
+	return stem
+}
+
 type fileState struct {
 	mtime float64
 	size  int64
@@ -485,31 +522,32 @@ func needsIndexing(indexed map[string]fileState, path string) bool {
 
 // indexStmts holds pre-prepared statements for batch indexing.
 type indexStmts struct {
-	selectVecRowids  *sql.Stmt
-	deleteVec        *sql.Stmt
-	deleteVecOwner   *sql.Stmt
-	deleteEmbeddings *sql.Stmt
-	deleteSession    *sql.Stmt
-	insertSession    *sql.Stmt
-	insertMsg        *sql.Stmt
-	insertTool       *sql.Stmt
-	insertFile       *sql.Stmt
-	selectFileState  *sql.Stmt
-	sessionSource    *sql.Stmt
-	updateSession    *sql.Stmt
+	existingMsgs   *sql.Stmt
+	selectVecRows  *sql.Stmt
+	deleteVec      *sql.Stmt
+	deleteVecOwner *sql.Stmt
+	deleteEmbed    *sql.Stmt
+	deleteMsg      *sql.Stmt
+	upsertSession  *sql.Stmt
+	insertMsg      *sql.Stmt
+	insertTool     *sql.Stmt
+	insertFile     *sql.Stmt
 }
 
 func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 	var s indexStmts
 	var err error
 
+	s.existingMsgs, err = tx.Prepare("SELECT id, rowid FROM messages WHERE session_id = ?")
+	if err != nil {
+		return nil, err
+	}
 	// message_rowid is an auxiliary column of messages_vec, which sqlite-vec
-	// cannot filter on — matching against it full-scans the vector store and
+	// cannot filter on: matching against it full-scans the vector store and
 	// reads a blob per row. Resolve the vec rowids from the owner map instead
 	// and delete them one at a time, which vec0 treats as a point delete.
-	s.selectVecRowids, err = tx.Prepare(`
-		SELECT vec_rowid FROM messages_vec_owner
-		WHERE message_rowid IN (SELECT rowid FROM messages WHERE session_id = ?)`)
+	s.selectVecRows, err = tx.Prepare(
+		"SELECT vec_rowid FROM messages_vec_owner WHERE message_rowid = ?")
 	if err != nil {
 		return nil, err
 	}
@@ -517,25 +555,31 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.deleteVecOwner, err = tx.Prepare(`
-		DELETE FROM messages_vec_owner
-		WHERE message_rowid IN (SELECT rowid FROM messages WHERE session_id = ?)`)
+	s.deleteVecOwner, err = tx.Prepare("DELETE FROM messages_vec_owner WHERE message_rowid = ?")
 	if err != nil {
 		return nil, err
 	}
-	s.deleteEmbeddings, err = tx.Prepare(
-		"DELETE FROM embedded_messages WHERE message_rowid IN (SELECT rowid FROM messages WHERE session_id = ?)",
-	)
+	s.deleteEmbed, err = tx.Prepare("DELETE FROM embedded_messages WHERE message_rowid = ?")
 	if err != nil {
 		return nil, err
 	}
-	s.deleteSession, err = tx.Prepare("DELETE FROM sessions WHERE id = ?")
+	s.deleteMsg, err = tx.Prepare("DELETE FROM messages WHERE rowid = ?")
 	if err != nil {
 		return nil, err
 	}
-	s.insertSession, err = tx.Prepare(`
+	s.upsertSession, err = tx.Prepare(`
 		INSERT INTO sessions (id, project_path, project_name, model, git_branch, started_at, updated_at, source_path, source_mtime, source_size, provenance)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claude_code')`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claude_code')
+		ON CONFLICT(id) DO UPDATE SET
+			project_path = excluded.project_path,
+			project_name = excluded.project_name,
+			model = excluded.model,
+			git_branch = excluded.git_branch,
+			started_at = excluded.started_at,
+			updated_at = excluded.updated_at,
+			source_path = excluded.source_path,
+			source_mtime = excluded.source_mtime,
+			source_size = excluded.source_size`)
 	if err != nil {
 		return nil, err
 	}
@@ -552,25 +596,7 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 		return nil, err
 	}
 	s.insertFile, err = tx.Prepare(
-		"INSERT OR REPLACE INTO indexed_files (path, mtime, size, head_sha) VALUES (?, ?, ?, ?)")
-	if err != nil {
-		return nil, err
-	}
-	s.selectFileState, err = tx.Prepare(
-		"SELECT size, head_sha FROM indexed_files WHERE path = ?")
-	if err != nil {
-		return nil, err
-	}
-	s.sessionSource, err = tx.Prepare(
-		"SELECT source_path FROM sessions WHERE id = ?")
-	if err != nil {
-		return nil, err
-	}
-	s.updateSession, err = tx.Prepare(`
-		UPDATE sessions
-		SET project_path = ?, project_name = ?, model = ?, git_branch = ?,
-			started_at = ?, updated_at = ?, source_path = ?, source_mtime = ?, source_size = ?
-		WHERE id = ?`)
+		"INSERT OR REPLACE INTO indexed_files (path, mtime, size) VALUES (?, ?, ?)")
 	if err != nil {
 		return nil, err
 	}
@@ -578,18 +604,16 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 }
 
 func (s *indexStmts) Close() {
-	s.selectVecRowids.Close()
+	s.existingMsgs.Close()
+	s.selectVecRows.Close()
 	s.deleteVec.Close()
 	s.deleteVecOwner.Close()
-	s.deleteEmbeddings.Close()
-	s.deleteSession.Close()
-	s.insertSession.Close()
+	s.deleteEmbed.Close()
+	s.deleteMsg.Close()
+	s.upsertSession.Close()
 	s.insertMsg.Close()
 	s.insertTool.Close()
 	s.insertFile.Close()
-	s.selectFileState.Close()
-	s.sessionSource.Close()
-	s.updateSession.Close()
 }
 
 // indexFile parses a JSONL file and inserts its contents using pre-prepared statements.
@@ -602,17 +626,6 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 
 	info, err := f.Stat()
 	if err != nil {
-		return err
-	}
-
-	// Hash the head of the file so a transcript that has only been appended to
-	// can be told apart from one that was rewritten. Claude Code writes these
-	// append-only, so the common case by far is "same file, more lines".
-	head, err := headHash(f)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
 
@@ -685,9 +698,12 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 
 	mtime := float64(info.ModTime().UnixMicro()) / 1e6
 
+	if id := sessionIDFromPath(path); id != "" {
+		sess.id = id
+	}
 	if sess.id == "" {
 		// No session found, but record the file so we skip it next time.
-		_, _ = stmts.insertFile.Exec(path, mtime, info.Size(), head)
+		_, _ = stmts.insertFile.Exec(path, mtime, info.Size())
 		return nil
 	}
 
@@ -698,43 +714,25 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 		sess.projectName = dirName
 	}
 
-	// Decide whether this is an append or a rewrite. Tearing the session down and
-	// rebuilding it costs a cascade delete of every message plus the FTS index
-	// work to unpick and re-add all of its text — minutes on a long transcript,
-	// repeated on every pass while the session is still being written to. When
-	// the file has only grown and its head is byte-for-byte what we indexed
-	// last time, the existing rows are still correct and INSERT OR IGNORE adds
-	// only what is new.
-	appendOnly := false
-	if head != "" {
-		var storedSize int64
-		var storedHead sql.NullString
-		if err := stmts.selectFileState.QueryRow(path).Scan(&storedSize, &storedHead); err == nil {
-			if storedHead.Valid && storedHead.String == head && info.Size() >= storedSize {
-				// The session must also still be owned by this exact file, or we
-				// would be merging two transcripts into one row.
-				var owner string
-				if err := stmts.sessionSource.QueryRow(sess.id).Scan(&owner); err == nil && owner == path {
-					appendOnly = true
-				}
-			}
-		}
+	// Messages already indexed for this session keep their rows, and with them
+	// their rowids and embeddings; transcripts only ever grow, so a re-index
+	// is normally an append. Anything indexed earlier that the transcript no
+	// longer contains is removed below.
+	stale, err := existingMessageRowids(stmts, sess.id)
+	if err != nil {
+		return fmt.Errorf("reading existing messages: %w", err)
 	}
 
-	if appendOnly {
-		if _, err := stmts.updateSession.Exec(
-			sess.projectPath, sess.projectName, sess.model, sess.gitBranch,
-			sess.startedAt, sess.updatedAt, path, mtime, info.Size(), sess.id,
-		); err != nil {
-			return fmt.Errorf("updating session: %w", err)
-		}
-	} else {
-		if err := rebuildSession(stmts, &sess, path, mtime, info.Size()); err != nil {
-			return err
-		}
+	_, err = stmts.upsertSession.Exec(
+		sess.id, sess.projectPath, sess.projectName, sess.model, sess.gitBranch,
+		sess.startedAt, sess.updatedAt, path, mtime, info.Size(),
+	)
+	if err != nil {
+		return fmt.Errorf("upserting session: %w", err)
 	}
 
 	for _, m := range messages {
+		delete(stale, m.id)
 		_, err = stmts.insertMsg.Exec(
 			m.id,
 			sess.id,
@@ -758,8 +756,126 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 		}
 	}
 
+	for _, rowid := range stale {
+		if err := deleteStaleMessage(stmts, rowid); err != nil {
+			return err
+		}
+	}
+
 	// Record file as indexed.
-	_, _ = stmts.insertFile.Exec(path, mtime, info.Size(), head)
+	_, _ = stmts.insertFile.Exec(path, mtime, info.Size())
+	return nil
+}
+
+// pruneOrphanVectors removes vectors whose message no longer exists, plus
+// their owner-map and embedding-tracking rows, and returns how many vectors
+// went. Orphans take top-k slots in vector search and are then filtered out,
+// so they shrink results without saying so. The owner map makes this a set of
+// point deletes rather than a scan of the vector store.
+func pruneOrphanVectors(db *sql.DB) (int, error) {
+	rows, err := db.Query(`
+		SELECT vec_rowid, message_rowid FROM messages_vec_owner o
+		WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.rowid = o.message_rowid)`)
+	if err != nil {
+		return 0, err
+	}
+	type orphan struct{ vec, msg int64 }
+	var orphans []orphan
+	for rows.Next() {
+		var o orphan
+		if err := rows.Scan(&o.vec, &o.msg); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		orphans = append(orphans, o)
+	}
+	rows.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	for _, o := range orphans {
+		if _, err := tx.Exec("DELETE FROM messages_vec WHERE rowid = ?", o.vec); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(
+			"DELETE FROM messages_vec_owner WHERE vec_rowid = ?",
+			o.vec,
+		); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(
+			"DELETE FROM embedded_messages WHERE message_rowid = ?",
+			o.msg,
+		); err != nil {
+			return 0, err
+		}
+	}
+	// Tracking rows can outlive both their message and its vectors; without
+	// this a re-added message with the same rowid would never be embedded.
+	if _, err := tx.Exec(`
+		DELETE FROM embedded_messages
+		WHERE message_rowid NOT IN (SELECT rowid FROM messages)`); err != nil {
+		return 0, err
+	}
+	return len(orphans), tx.Commit()
+}
+
+// existingMessageRowids returns id -> rowid for every message already stored
+// for the session.
+func existingMessageRowids(stmts *indexStmts, sessionID string) (map[string]int64, error) {
+	rows, err := stmts.existingMsgs.Query(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := make(map[string]int64)
+	for rows.Next() {
+		var id string
+		var rowid int64
+		if err := rows.Scan(&id, &rowid); err != nil {
+			return nil, err
+		}
+		m[id] = rowid
+	}
+	return m, rows.Err()
+}
+
+// deleteStaleMessage removes one message and everything derived from it: its
+// chunk vectors (by vec rowid, via the owner map), its owner-map and
+// embedding-tracking rows, and the message row itself, whose delete cascades
+// to tool_uses and the FTS index.
+func deleteStaleMessage(stmts *indexStmts, rowid int64) error {
+	rows, err := stmts.selectVecRows.Query(rowid)
+	if err != nil {
+		return fmt.Errorf("resolving stale vectors: %w", err)
+	}
+	var vecRowids []int64
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			return err
+		}
+		vecRowids = append(vecRowids, v)
+	}
+	rows.Close()
+	for _, v := range vecRowids {
+		if _, err := stmts.deleteVec.Exec(v); err != nil {
+			return fmt.Errorf("deleting stale vector: %w", err)
+		}
+	}
+	if _, err := stmts.deleteVecOwner.Exec(rowid); err != nil {
+		return fmt.Errorf("deleting stale vector owner: %w", err)
+	}
+	if _, err := stmts.deleteEmbed.Exec(rowid); err != nil {
+		return fmt.Errorf("deleting stale embedding record: %w", err)
+	}
+	if _, err := stmts.deleteMsg.Exec(rowid); err != nil {
+		return fmt.Errorf("deleting stale message: %w", err)
+	}
 	return nil
 }
 
@@ -1001,52 +1117,4 @@ func unquote(raw json.RawMessage) string {
 		return ""
 	}
 	return s
-}
-
-// headHash fingerprints the first bytes of a transcript. Two files with the same
-// head and a non-shrinking size are the same transcript, longer.
-func headHash(f *os.File) (string, error) {
-	buf := make([]byte, headHashBytes)
-	n, err := io.ReadFull(f, buf)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return "", err
-	}
-	if n == 0 {
-		return "", nil
-	}
-	sum := sha256.Sum256(buf[:n])
-	return hex.EncodeToString(sum[:]), nil
-}
-
-const headHashBytes = 64 * 1024
-
-// rebuildSession drops everything the index holds for a session and puts the
-// session row back. Only for a transcript that was rewritten rather than
-// appended to — it cascades a delete of every message, which is the expensive
-// half of indexing.
-func rebuildSession(stmts *indexStmts, sess *sessionMeta, path string, mtime float64, size int64) error {
-	if rows, err := stmts.selectVecRowids.Query(sess.id); err == nil {
-		var vecRowids []int64
-		for rows.Next() {
-			var vrid int64
-			if err := rows.Scan(&vrid); err == nil {
-				vecRowids = append(vecRowids, vrid)
-			}
-		}
-		rows.Close()
-		for _, vrid := range vecRowids {
-			_, _ = stmts.deleteVec.Exec(vrid)
-		}
-	}
-	_, _ = stmts.deleteVecOwner.Exec(sess.id)
-	_, _ = stmts.deleteEmbeddings.Exec(sess.id)
-	_, _ = stmts.deleteSession.Exec(sess.id)
-
-	if _, err := stmts.insertSession.Exec(
-		sess.id, sess.projectPath, sess.projectName, sess.model, sess.gitBranch,
-		sess.startedAt, sess.updatedAt, path, mtime, size,
-	); err != nil {
-		return fmt.Errorf("inserting session: %w", err)
-	}
-	return nil
 }

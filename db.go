@@ -89,14 +89,6 @@ func initSchema(db *sql.DB) error {
 	if err := backfillVecOwner(db); err != nil {
 		return err
 	}
-
-	// head_sha records a hash of the first bytes of each indexed transcript, so a
-	// file that has only grown can be told apart from one that was rewritten.
-	// Without it the indexer has to assume any change might be a rewrite and
-	// tear the whole session down before rebuilding it.
-	if _, err := ensureColumn(db, "indexed_files", "head_sha", "TEXT"); err != nil {
-		return err
-	}
 	if ver < embedSchemaVersion {
 		if _, err := db.Exec(
 			fmt.Sprintf("PRAGMA user_version = %d", embedSchemaVersion),

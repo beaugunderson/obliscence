@@ -44,7 +44,9 @@ func (cmd *HookCmd) Run(rc *RunContext) error {
 	// Swallow all errors — hooks must exit 0 silently to avoid
 	// the false "hook error" label bug in Claude Code.
 	if input.TranscriptPath != "" {
-		_ = indexSingleFile(rc.DB, input.TranscriptPath)
+		if isSessionTranscript(input.TranscriptPath) {
+			_ = indexSingleFile(rc.DB, input.TranscriptPath)
+		}
 		return nil
 	}
 

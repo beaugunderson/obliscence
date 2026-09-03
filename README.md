@@ -126,7 +126,7 @@ obliscence corrections --project home-app --after 2026-05-01 --json
 
 ## Incremental indexing
 
-`obliscence index` scans `~/.claude/projects/` for JSONL files. Only new or changed files are processed (tracked by mtime + size).
+`obliscence index` scans every `~/.claude*/projects/` directory for session transcripts (`<session-uuid>.jsonl`; subagent `agent-*.jsonl` files are skipped). Only new or changed files are processed (tracked by mtime + size), and a changed file only adds the messages that are new since the last index, so existing embeddings are never redone. `--force` re-parses every file the same way.
 
 ## Database
 
