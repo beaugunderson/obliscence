@@ -10,6 +10,8 @@ make build
 
 CGo required (mattn/go-sqlite3, sqlite-vec, daulet/tokenizers). The Makefile auto-downloads `libtokenizers.a` and sets `CGO_LDFLAGS`/`CGO_CFLAGS`.
 
+`--version` prints `main.version`, stamped by `-X main.version=...` from `git describe` in the Makefile and from the tag in goreleaser; an unstamped build falls back to the Go toolchain's embedded module version or VCS revision (`version.go`).
+
 ## Architecture
 
 Flat structure, single package. Each file maps to a concern:

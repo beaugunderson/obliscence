@@ -8,9 +8,10 @@ import (
 )
 
 var cli struct {
-	DB      string `help:"Database path." default:"~/.obliscence/db.sqlite" env:"OBLISCENCE_DB"`
-	JSON    bool   `help:"Output JSON." name:"json"`
-	Profile string `help:"Write CPU profile to file." hidden:""`
+	DB      string           `help:"Database path." default:"~/.obliscence/db.sqlite" env:"OBLISCENCE_DB"`
+	JSON    bool             `help:"Output JSON." name:"json"`
+	Profile string           `help:"Write CPU profile to file." hidden:""`
+	Version kong.VersionFlag `help:"Print the version and exit."`
 
 	Index       IndexCmd       `cmd:"" help:"Index new/changed sessions."`
 	Import      ImportCmd      `cmd:"" help:"Import a claude.ai data export (.zip) and index it idempotently."`
@@ -31,6 +32,7 @@ func main() {
 		kong.Name("obliscence"),
 		kong.Description("Archive and search Claude Code conversations."),
 		kong.UsageOnError(),
+		kong.Vars{"version": versionString()},
 	)
 
 	if cli.Profile != "" {

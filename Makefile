@@ -4,11 +4,14 @@ CGO_LDFLAGS ?= -L$(CURDIR)/lib -Wl,-no_warn_duplicate_libraries
 CGO_CFLAGS ?= -Wno-deprecated-declarations
 export CGO_LDFLAGS CGO_CFLAGS
 
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo devel)
+LDFLAGS := -X main.version=$(VERSION)
+
 build: setup-lib
-	go build -tags "sqlite_fts5" -o obliscence .
+	go build -tags "sqlite_fts5" -ldflags "$(LDFLAGS)" -o obliscence .
 
 install: setup-lib
-	go install -tags "sqlite_fts5" .
+	go install -tags "sqlite_fts5" -ldflags "$(LDFLAGS)" .
 
 # Download prebuilt libtokenizers if missing.
 setup-lib:
