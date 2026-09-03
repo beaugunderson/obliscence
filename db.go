@@ -73,11 +73,28 @@ func initSchema(db *sql.DB) error {
 		if _, err := db.Exec("DROP TABLE IF EXISTS messages_vec"); err != nil {
 			return err
 		}
+		if _, err := db.Exec("DROP TABLE IF EXISTS messages_vec_owner"); err != nil {
+			return err
+		}
 		if _, err := db.Exec("DELETE FROM embedded_messages"); err != nil {
 			return err
 		}
 	}
 	if _, err := db.Exec(vecSchema); err != nil {
+		return err
+	}
+	if _, err := db.Exec(vecOwnerSchema); err != nil {
+		return err
+	}
+	if err := backfillVecOwner(db); err != nil {
+		return err
+	}
+
+	// head_sha records a hash of the first bytes of each indexed transcript, so a
+	// file that has only grown can be told apart from one that was rewritten.
+	// Without it the indexer has to assume any change might be a rewrite and
+	// tear the whole session down before rebuilding it.
+	if _, err := ensureColumn(db, "indexed_files", "head_sha", "TEXT"); err != nil {
 		return err
 	}
 	if ver < embedSchemaVersion {
@@ -197,6 +214,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_vec USING vec0(
 );
 `
 
+// vecOwnerSchema maps each vector row back to the message it came from, in an
+// ordinary B-tree. message_rowid inside messages_vec is an AUXILIARY column,
+// which sqlite-vec cannot filter on: any "WHERE message_rowid = ?" degrades to
+// a full scan that opens a blob per vector row to read the value back. Deleting
+// a session's vectors that way costs minutes on a large index. This table gives
+// the delete path an indexed lookup and lets it delete by vec rowid, which vec0
+// does handle as a point operation.
+const vecOwnerSchema = `
+CREATE TABLE IF NOT EXISTS messages_vec_owner (
+    vec_rowid INTEGER PRIMARY KEY,
+    message_rowid INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vec_owner_message ON messages_vec_owner(message_rowid);
+`
+
 // expandPath replaces a leading ~ with the user's home directory.
 func expandPath(p string) string {
 	if strings.HasPrefix(p, "~/") {
@@ -243,4 +275,41 @@ func ensureColumn(db *sql.DB, table, col, def string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// backfillVecOwner populates messages_vec_owner for databases whose vectors were
+// written before the owner map existed. Without it, those vectors are invisible
+// to the delete path and would survive a re-index as duplicates.
+//
+// The mapping is read out of sqlite-vec's own shadow tables, which are ordinary
+// B-trees: messages_vec_rowids.rowid is the vec rowid and
+// messages_vec_auxiliary.value00 is the first auxiliary column, message_rowid.
+// Going through the virtual table instead would mean the same per-row blob reads
+// this change exists to avoid. If the shadow layout is not what we expect, fall
+// back to the slow but version-independent read.
+func backfillVecOwner(db *sql.DB) error {
+	var owned int
+	if err := db.QueryRow("SELECT COUNT(*) FROM messages_vec_owner").Scan(&owned); err != nil {
+		return err
+	}
+	if owned > 0 {
+		return nil
+	}
+	var vectors int
+	if err := db.QueryRow("SELECT COUNT(*) FROM messages_vec_rowids").Scan(&vectors); err != nil {
+		// No shadow table to read: nothing embedded yet, or a layout we do not know.
+		return nil
+	}
+	if vectors == 0 {
+		return nil
+	}
+	if _, err := db.Exec(`
+		INSERT OR REPLACE INTO messages_vec_owner(vec_rowid, message_rowid)
+		SELECT rowid, value00 FROM messages_vec_auxiliary WHERE value00 IS NOT NULL`); err == nil {
+		return nil
+	}
+	_, err := db.Exec(`
+		INSERT OR REPLACE INTO messages_vec_owner(vec_rowid, message_rowid)
+		SELECT rowid, message_rowid FROM messages_vec`)
+	return err
 }
