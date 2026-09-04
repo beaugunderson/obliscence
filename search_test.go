@@ -250,6 +250,27 @@ func TestFiltersConstrainCandidateSetNotResults(t *testing.T) {
 	}
 }
 
+func TestNormalizeProvenance(t *testing.T) {
+	cases := map[string]string{
+		"claude.ai":   "claude_ai",
+		"claude-code": "claude_code",
+		"local":       "claude_code",
+		"pi":          "pi",
+	}
+	for input, want := range cases {
+		got, err := normalizeProvenance(input)
+		if err != nil || got != want {
+			t.Errorf("normalizeProvenance(%q)=(%q, %v), want %q", input, got, err, want)
+		}
+	}
+	if _, err := normalizeProvenance(
+		"cursor",
+	); err == nil ||
+		!strings.Contains(err.Error(), "pi") {
+		t.Errorf("invalid source error = %v, want valid options including pi", err)
+	}
+}
+
 // TestSearchRejectsUnhonorableFlags covers flags a mode cannot act on. Each must
 // be an error, since ignoring one silently answers a different question.
 func TestSearchRejectsUnhonorableFlags(t *testing.T) {

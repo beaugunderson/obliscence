@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,41 @@ func TestClaudeConfigDir(t *testing.T) {
 		if got := claudeConfigDir(c.sourcePath); got != c.want {
 			t.Errorf("%s: claudeConfigDir(%q)=%q, want %q", c.name, c.sourcePath, got, c.want)
 		}
+	}
+}
+
+func TestResumePi(t *testing.T) {
+	dir := t.TempDir()
+	project := filepath.Join(dir, "project")
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(session, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	capture := filepath.Join(dir, "capture")
+	script := "#!/bin/sh\nprintf '%s|%s' \"$PWD\" \"$*\" > \"$CAPTURE\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "pi"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CAPTURE", capture)
+
+	if err := resumePi("session-id", project, session); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := project + "|--session " + session
+	if strings.TrimSpace(string(got)) != want {
+		t.Errorf("pi invocation = %q, want %q", got, want)
 	}
 }
 

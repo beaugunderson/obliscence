@@ -19,10 +19,10 @@ var cli struct {
 	Corrections CorrectionsCmd `cmd:"" help:"Find user messages that correct or push back on the assistant."`
 	Sessions    SessionsCmd    `cmd:"" help:"List sessions."`
 	Show        ShowCmd        `cmd:"" help:"Show a session conversation."`
-	Resume      ResumeCmd      `cmd:"" help:"Resume a session in Claude Code."`
+	Resume      ResumeCmd      `cmd:"" help:"Resume a session in its originating coding agent."`
 	Stats       StatsCmd       `cmd:"" help:"Database statistics."`
 	Projects    ProjectsCmd    `cmd:"" help:"List projects."`
-	Setup       SetupCmd       `cmd:"" help:"Download models, install hooks and skill."`
+	Setup       SetupCmd       `cmd:"" help:"Download models, install agent integrations and skill."`
 	Uninstall   UninstallCmd   `cmd:"" help:"Remove hooks, skill, and downloaded models."`
 	Hook        HookCmd        `cmd:"" help:"Handle Claude Code hook invocation." hidden:""`
 }
@@ -30,7 +30,7 @@ var cli struct {
 func main() {
 	ctx := kong.Parse(&cli,
 		kong.Name("obliscence"),
-		kong.Description("Archive and search Claude Code conversations."),
+		kong.Description("Archive and search Claude Code and pi conversations."),
 		kong.UsageOnError(),
 		kong.Vars{"version": versionString()},
 	)

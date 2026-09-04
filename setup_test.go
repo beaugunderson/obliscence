@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -45,6 +47,39 @@ func TestSkillDocumentsSearchFlags(t *testing.T) {
 				flag,
 			)
 		}
+	}
+}
+
+func TestPiExtensionIndexesLifecycle(t *testing.T) {
+	for _, want := range []string{
+		`pi.on("session_start"`,
+		`pi.on("session_shutdown"`,
+		`spawn("obliscence", ["hook"]`,
+		`ctx.sessionManager.getSessionFile()`,
+	} {
+		if !strings.Contains(piExtensionContent, want) {
+			t.Errorf("pi extension missing %q", want)
+		}
+	}
+}
+
+func TestInstallAndRemovePiExtension(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", dir)
+	path := filepath.Join(dir, "extensions", "obliscence.ts")
+
+	(&SetupCmd{}).installPiExtension()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != piExtensionContent {
+		t.Error("installed pi extension differs from source template")
+	}
+
+	(&UninstallCmd{}).removePiExtension()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("pi extension remains after uninstall: %v", err)
 	}
 }
 

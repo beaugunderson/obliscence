@@ -18,13 +18,20 @@ func (cmd *ResumeCmd) Run(rc *RunContext) error {
 		return err
 	}
 
-	var projectPath, sourcePath string
+	var projectPath, sourcePath, provenance string
 	err = rc.DB.QueryRow(
-		"SELECT project_path, source_path FROM sessions WHERE id = ?",
+		"SELECT project_path, source_path, provenance FROM sessions WHERE id = ?",
 		sessionID,
-	).Scan(&projectPath, &sourcePath)
+	).Scan(&projectPath, &sourcePath, &provenance)
 	if err != nil {
 		return err
+	}
+
+	if provenance == "pi" {
+		return resumePi(sessionID, projectPath, sourcePath)
+	}
+	if provenance == "claude_ai" {
+		return fmt.Errorf("claude.ai web sessions cannot be resumed")
 	}
 
 	// Resolve worktree paths to the actual project root.
@@ -78,6 +85,28 @@ func (cmd *ResumeCmd) Run(rc *RunContext) error {
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	c.Env = resumeEnv(os.Environ(), configDir)
+	return c.Run()
+}
+
+func resumePi(sessionID, projectPath, sourcePath string) error {
+	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
+		return fmt.Errorf("project directory no longer exists: %s", projectPath)
+	}
+	if _, err := os.Stat(sourcePath); err != nil {
+		return fmt.Errorf("pi session file no longer exists: %s", sourcePath)
+	}
+	piPath, err := exec.LookPath("pi")
+	if err != nil {
+		return fmt.Errorf("pi not found in PATH")
+	}
+
+	fmt.Fprintf(os.Stderr, "resuming %s in %s with pi\n",
+		dim(sessionID), bold(filepath.Base(projectPath)))
+	c := exec.Command(piPath, "--session", sourcePath)
+	c.Dir = projectPath
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
 	return c.Run()
 }
 

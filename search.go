@@ -50,7 +50,7 @@ const maxVecK = 4096
 type SearchCmd struct {
 	Query          string  `arg:"" help:"Search query."`
 	Project        string  `       help:"Filter by project name."                                                                      short:"p"`
-	Source         string  `       help:"Filter by provenance: 'claude.ai' or 'local' (claude_code)."                                            name:"source"`
+	Source         string  `       help:"Filter by provenance: 'claude.ai', 'claude-code', or 'pi'."                                             name:"source"`
 	Role           string  `       help:"Filter by role (user, assistant)."                                                            short:"r"`
 	Limit          int     `       help:"Max results."                                                                                 short:"l"                        default:"20"`
 	After          string  `       help:"Only results after this date (YYYY-MM-DD)."                                                   short:"a"`
@@ -206,7 +206,7 @@ func (cmd *SearchCmd) filterClauses() ([]string, []interface{}) {
 }
 
 // normalizeProvenance maps a user-supplied --source value onto a stored
-// provenance value ("claude_code" / "claude_ai"). Empty input means no filter.
+// provenance value ("claude_code" / "claude_ai" / "pi"). Empty input means no filter.
 // An unrecognized value is an error that names the valid options, so a calling
 // agent gets actionable feedback.
 func normalizeProvenance(s string) (string, error) {
@@ -215,14 +215,17 @@ func normalizeProvenance(s string) (string, error) {
 		return "", nil
 	case "claude_ai", "claude.ai", "claudeai", "ai", "web":
 		return "claude_ai", nil
-	case "claude_code", "claudecode", "code", "local", "cc":
+	case "claude_code", "claude-code", "claudecode", "code", "local", "cc":
 		return "claude_code", nil
+	case "pi":
+		return "pi", nil
 	default:
 		return "", fmt.Errorf(
-			"invalid --source %q; valid values: %q (aliases: claude.ai, ai, web) or %q (aliases: local, code, cc)",
+			"invalid --source %q; valid values: %q (aliases: claude.ai, ai, web), %q (aliases: claude-code, local, code, cc), or %q",
 			s,
 			"claude_ai",
 			"claude_code",
+			"pi",
 		)
 	}
 }
