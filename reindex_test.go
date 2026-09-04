@@ -199,6 +199,20 @@ func TestSessionFilesSkipsAgentTranscripts(t *testing.T) {
 	}
 }
 
+func TestSessionIDFromPath(t *testing.T) {
+	id := "11111111-2222-3333-4444-555555555555"
+	cases := map[string]string{
+		id + ".jsonl": id,
+		"2026-09-04T03-22-23-856Z_" + id + ".jsonl": id,
+		"agent-abc.jsonl": "",
+	}
+	for name, want := range cases {
+		if got := sessionIDFromPath(name); got != want {
+			t.Errorf("sessionIDFromPath(%q)=%q, want %q", name, got, want)
+		}
+	}
+}
+
 // TestSessionIDFromFilename: a forked session's transcript begins with lines
 // copied from its parent, carrying the parent's sessionId, so the file name
 // (which Claude Code sets to the session id) is the authoritative id.
@@ -224,6 +238,73 @@ func TestSessionIDFromFilename(t *testing.T) {
 	if got := count(t, db, "SELECT COUNT(*) FROM sessions WHERE id = ?", fork); got != 1 {
 		t.Errorf("session keyed as %s not found; sessions: %d under parent id", fork,
 			count(t, db, "SELECT COUNT(*) FROM sessions WHERE id = ?", parent))
+	}
+}
+
+func TestIndexPiSession(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openDB(filepath.Join(dir, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	sid := "11111111-2222-3333-4444-555555555555"
+	lines := []string{
+		`{"type":"session","version":3,"id":"` + sid + `","timestamp":"2026-09-04T03:22:23.856Z","cwd":"/tmp/pi-project"}`,
+		`{"type":"message","id":"user0001","parentId":null,"timestamp":"2026-09-04T03:22:24.000Z","message":{"role":"user","content":[{"type":"text","text":"please find the frobnicator setting"}],"timestamp":1788492144000}}`,
+		`{"type":"message","id":"asst0001","parentId":"user0001","timestamp":"2026-09-04T03:22:25.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"secret scratchpad"},{"type":"text","text":"The frobnicator is enabled."},{"type":"toolCall","id":"call0001","name":"read","arguments":{"path":"config.toml"}}],"provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":42,"output":7},"stopReason":"toolUse","timestamp":1788492145000}}`,
+		`{"type":"message","id":"tool0001","parentId":"asst0001","timestamp":"2026-09-04T03:22:26.000Z","message":{"role":"toolResult","toolCallId":"call0001","toolName":"read","content":[{"type":"text","text":"noisy tool output"}],"isError":false,"timestamp":1788492146000}}`,
+	}
+	path := filepath.Join(dir, "2026-09-04T03-22-23-856Z_"+sid+".jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := indexSingleFile(db, path); err != nil {
+		t.Fatal(err)
+	}
+
+	var project, provenance, model, started, updated string
+	if err := db.QueryRow(`
+		SELECT project_name, provenance, model, started_at, updated_at
+		FROM sessions WHERE id = ?`, sid,
+	).Scan(&project, &provenance, &model, &started, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if project != "pi-project" || provenance != "pi" || model != "claude-sonnet-4-5" {
+		t.Errorf(
+			"session metadata = project %q, provenance %q, model %q",
+			project,
+			provenance,
+			model,
+		)
+	}
+	if started != "2026-09-04T03:22:23.856Z" || updated != "2026-09-04T03:22:25.000Z" {
+		t.Errorf("session times = %q..%q", started, updated)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM messages WHERE session_id = ?", sid); got != 2 {
+		t.Errorf("messages = %d, want 2 user/assistant messages", got)
+	}
+	var content string
+	var input, output int
+	if err := db.QueryRow(
+		"SELECT content, input_tokens, output_tokens FROM messages WHERE id = ?",
+		sid+":asst0001",
+	).Scan(&content, &input, &output); err != nil {
+		t.Fatal(err)
+	}
+	if content != "The frobnicator is enabled." || input != 42 || output != 7 {
+		t.Errorf("assistant = %q, tokens %d/%d", content, input, output)
+	}
+	var toolName, summary string
+	if err := db.QueryRow(
+		"SELECT tool_name, tool_input_summary FROM tool_uses WHERE id = ?",
+		sid+":call0001",
+	).Scan(&toolName, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if toolName != "read" || summary != "config.toml" {
+		t.Errorf("tool = %q %q", toolName, summary)
 	}
 }
 

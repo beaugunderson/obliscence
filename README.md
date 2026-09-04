@@ -1,6 +1,6 @@
 # obliscence
 
-Archive and search Claude Code conversations. SQLite + FTS5/BM25 + sqlite-vec semantic search.
+Archive and search Claude Code and pi conversations. SQLite + FTS5/BM25 + sqlite-vec semantic search.
 
 ## Install
 
@@ -35,7 +35,7 @@ obliscence search --hybrid    # FTS5 + semantic via reciprocal rank fusion
 obliscence corrections        # Find user messages that correct/push back on the assistant
 obliscence sessions           # List recent sessions
 obliscence show <session-id>  # Display a conversation (full UUID or unique prefix)
-obliscence resume <session-id> # Resume a session in Claude Code
+obliscence resume <session-id> # Resume in the originating coding agent
 obliscence projects           # List all projects
 obliscence stats              # Database statistics
 ```
@@ -50,6 +50,10 @@ obliscence import ~/Downloads/data-*.zip
 
 Accepts a `.zip`, an extracted export directory, or a `conversations.json`. Idempotent — each conversation/message keys on its claude.ai uuid, so re-importing the same export (or a newer, overlapping one) only adds what's new. Imported chats land under the `claude.ai` project (filter with `search -p claude.ai`).
 
+### Pi sessions
+
+Pi auto-saves sessions to `~/.pi/agent/sessions/` by default; no extension is needed to preserve the JSONL transcript. Pi does not currently auto-prune saved sessions—they are removed only by explicit deletion (for example, Ctrl+D in `/resume`). `obliscence setup` installs an extension only to trigger indexing on pi session start/shutdown, and obliscence never deletes the source transcripts.
+
 ### Search flags
 
 ```
@@ -58,7 +62,7 @@ Accepts a `.zip`, an extracted export directory, or a `conversations.json`. Idem
 --limit, -l     Max results (default 20)
 --after, -a     Results after date (YYYY-MM-DD)
 --before, -b    Results before date (YYYY-MM-DD)
---source        Filter by provenance: claude.ai or local
+--source        Filter by provenance: claude.ai, claude-code, or pi
 --exact, -e     Match the query as a phrase (keyword and hybrid only)
 --semantic         Vector similarity search (requires setup)
 --hybrid           FTS5 + semantic via reciprocal rank fusion
@@ -93,7 +97,8 @@ obliscence search "terraform" --json | jq '.[].snippet'
    - `SessionEnd` — indexes the conversation when a session ends cleanly
    - `PreCompact` — indexes before context compaction so no messages are lost
    - All run `obliscence hook` asynchronously with suppressed output
-3. Installs the `/search-history` skill so Claude uses obliscence proactively
+3. Installs a pi extension at `~/.pi/agent/extensions/obliscence.ts` that runs the same incremental scan on session start and indexes the current transcript on shutdown
+4. Installs the `/search-history` skill so Claude uses obliscence proactively
 
 All inference runs locally — no API calls, no server process.
 
@@ -126,7 +131,7 @@ obliscence corrections --project home-app --after 2026-05-01 --json
 
 ## Incremental indexing
 
-`obliscence index` scans every `~/.claude*/projects/` directory for session transcripts (`<session-uuid>.jsonl`; subagent `agent-*.jsonl` files are skipped). Only new or changed files are processed (tracked by mtime + size), and a changed file only adds the messages that are new since the last index, so existing embeddings are never redone. `--force` re-parses every file the same way.
+`obliscence index` scans every `~/.claude*/projects/` directory and pi's `~/.pi/agent/sessions/` directory (including pi's configured `sessionDir` or `PI_CODING_AGENT_SESSION_DIR`). Claude subagent `agent-*.jsonl` files are skipped. Only new or changed files are processed (tracked by mtime + size), and a changed file only adds messages that are new since the last index, so existing embeddings are never redone. `--force` re-parses every file the same way.
 
 ## Database
 

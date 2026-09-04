@@ -20,11 +20,42 @@ type IndexCmd struct {
 	NoEmbed bool   `help:"Skip embedding generation."                    name:"no-embed"`
 }
 
-// claudeRoots returns every Claude Code "projects" directory to index. Claude
-// Code keeps each install/profile under a sibling of ~/.claude (~/.claude,
-// ~/.claude-personal, ~/.claude-teams, ...), all matching ~/.claude*/projects.
-// Any such directory that exists is included, so a new profile is picked up
-// without configuration.
+// sessionRoots returns every directory whose immediate children hold session
+// transcripts. Claude Code keeps profiles under ~/.claude*/projects; pi keeps
+// them under ~/.pi/agent/sessions by default.
+func sessionRoots() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	roots := sessionRootsUnder(home)
+
+	// Pi allows its config and session directories to be moved. Honor those
+	// overrides in addition to the default so old and current stores can coexist.
+	piDir := expandPath(os.Getenv("PI_CODING_AGENT_DIR"))
+	if piDir == "" {
+		piDir = filepath.Join(home, ".pi", "agent")
+	}
+	roots = appendExistingDir(roots, filepath.Join(piDir, "sessions"))
+	if envDir := os.Getenv("PI_CODING_AGENT_SESSION_DIR"); envDir != "" {
+		roots = appendExistingDir(roots, expandPath(envDir))
+	} else if data, err := os.ReadFile(filepath.Join(piDir, "settings.json")); err == nil {
+		var settings struct {
+			SessionDir string `json:"sessionDir"`
+		}
+		if json.Unmarshal(data, &settings) == nil && settings.SessionDir != "" {
+			dir := expandPath(settings.SessionDir)
+			if !filepath.IsAbs(dir) {
+				dir = filepath.Join(piDir, dir)
+			}
+			roots = appendExistingDir(roots, dir)
+		}
+	}
+	return roots
+}
+
+// claudeRoots is retained for hook lookup, which only handles Claude's hook
+// payload when no transcript path is supplied.
 func claudeRoots() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -33,24 +64,40 @@ func claudeRoots() []string {
 	return claudeRootsUnder(home)
 }
 
+// sessionRootsUnder returns the default Claude Code and pi transcript roots.
+// Split from sessionRoots so tests can point it at a temporary home.
+func sessionRootsUnder(home string) []string {
+	roots := claudeRootsUnder(home)
+	return appendExistingDir(roots, filepath.Join(home, ".pi", "agent", "sessions"))
+}
+
 // claudeRootsUnder globs home for ".claude*/projects" directories, returning
-// only those that exist as directories. Split from claudeRoots so tests can
-// point it at a temp home.
+// only those that exist as directories.
 func claudeRootsUnder(home string) []string {
 	matches, _ := filepath.Glob(filepath.Join(home, ".claude*", "projects"))
 	var roots []string
 	for _, m := range matches {
-		if info, err := os.Stat(m); err == nil && info.IsDir() {
-			roots = append(roots, m)
-		}
+		roots = appendExistingDir(roots, m)
 	}
 	return roots
 }
 
+func appendExistingDir(roots []string, dir string) []string {
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return roots
+	}
+	for _, root := range roots {
+		if root == dir {
+			return roots
+		}
+	}
+	return append(roots, dir)
+}
+
 func (cmd *IndexCmd) Run(rc *RunContext) error {
-	roots := claudeRoots()
+	roots := sessionRoots()
 	if len(roots) == 0 {
-		return fmt.Errorf("no Claude projects directories found under ~/.claude*")
+		return fmt.Errorf("no Claude Code or pi session directories found")
 	}
 
 	// Initialize embedder if available and not disabled.
@@ -417,11 +464,17 @@ func printProgress(label string, done, total int, start time.Time) {
 func (cmd *IndexCmd) indexSession(rc *RunContext, roots []string) error {
 	var matches []string
 	for _, root := range roots {
-		m, err := filepath.Glob(filepath.Join(root, "*", cmd.Session+".jsonl"))
-		if err != nil {
-			return err
+		patterns := []string{
+			filepath.Join(root, "*", cmd.Session+".jsonl"),
+			filepath.Join(root, "*", "*_"+cmd.Session+".jsonl"),
 		}
-		matches = append(matches, m...)
+		for _, pattern := range patterns {
+			m, err := filepath.Glob(pattern)
+			if err != nil {
+				return err
+			}
+			matches = append(matches, m...)
+		}
 	}
 	if len(matches) == 0 {
 		return fmt.Errorf("session %s not found", cmd.Session)
@@ -464,12 +517,15 @@ func isSessionTranscript(path string) bool {
 	return !strings.HasPrefix(filepath.Base(path), "agent-")
 }
 
-// sessionIDFromPath returns the session id encoded in a transcript's file
-// name, or "" when the name is not a UUID. The file name is authoritative: a
-// forked session's transcript starts with lines copied from its parent that
-// still carry the parent's sessionId.
+// sessionIDFromPath returns the session UUID encoded in a transcript's file
+// name. Claude uses <uuid>.jsonl; pi uses <timestamp>_<uuid>.jsonl. The file
+// name is authoritative for Claude forks, whose copied lines retain the parent
+// sessionId.
 func sessionIDFromPath(path string) string {
 	stem := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	if i := strings.LastIndexByte(stem, '_'); i >= 0 {
+		stem = stem[i+1:]
+	}
 	if len(stem) != 36 || strings.Count(stem, "-") != 4 {
 		return ""
 	}
@@ -569,7 +625,7 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 	}
 	s.upsertSession, err = tx.Prepare(`
 		INSERT INTO sessions (id, project_path, project_name, model, git_branch, started_at, updated_at, source_path, source_mtime, source_size, provenance)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claude_code')
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			project_path = excluded.project_path,
 			project_name = excluded.project_name,
@@ -579,7 +635,8 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 			updated_at = excluded.updated_at,
 			source_path = excluded.source_path,
 			source_mtime = excluded.source_mtime,
-			source_size = excluded.source_size`)
+			source_size = excluded.source_size,
+			provenance = excluded.provenance`)
 	if err != nil {
 		return nil, err
 	}
@@ -654,7 +711,12 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 
 		msgType := unquote(raw["type"])
 
-		// Extract session metadata from any message that has it.
+		// Pi stores metadata in a session header and messages under type=message.
+		// Claude Code stores metadata alongside type=user/type=assistant entries.
+		if msgType == "session" {
+			extractPiSessionMeta(&sess, raw)
+			continue
+		}
 		if sess.id == "" {
 			extractSessionMeta(&sess, raw)
 		}
@@ -674,12 +736,7 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 			msg := parseUserMessage(raw)
 			if msg != nil {
 				messages = append(messages, *msg)
-				if ts := msg.timestamp; ts != "" {
-					sess.updatedAt = ts
-					if sess.startedAt == "" {
-						sess.startedAt = ts
-					}
-				}
+				updateSessionTimes(&sess, msg.timestamp)
 			}
 		case "assistant":
 			msg, toolUses := parseAssistantMessage(raw)
@@ -689,9 +746,17 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 				if sess.model == "" {
 					sess.model = msg.model
 				}
-				if ts := msg.timestamp; ts != "" {
-					sess.updatedAt = ts
+				updateSessionTimes(&sess, msg.timestamp)
+			}
+		case "message":
+			msg, toolUses := parsePiMessage(raw, sess.id)
+			if msg != nil {
+				messages = append(messages, *msg)
+				tools = append(tools, toolUses...)
+				if sess.model == "" {
+					sess.model = msg.model
 				}
+				updateSessionTimes(&sess, msg.timestamp)
 			}
 		}
 	}
@@ -723,9 +788,12 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 		return fmt.Errorf("reading existing messages: %w", err)
 	}
 
+	if sess.provenance == "" {
+		sess.provenance = "claude_code"
+	}
 	_, err = stmts.upsertSession.Exec(
 		sess.id, sess.projectPath, sess.projectName, sess.model, sess.gitBranch,
-		sess.startedAt, sess.updatedAt, path, mtime, info.Size(),
+		sess.startedAt, sess.updatedAt, path, mtime, info.Size(), sess.provenance,
 	)
 	if err != nil {
 		return fmt.Errorf("upserting session: %w", err)
@@ -882,10 +950,12 @@ func deleteStaleMessage(stmts *indexStmts, rowid int64) error {
 // isRelevantLine does a cheap byte scan to check if a JSONL line contains
 // a message type we care about, avoiding a full JSON parse for irrelevant lines.
 func isRelevantLine(line []byte) bool {
-	// We need: "type":"user", "type":"assistant", or any line with "sessionId"
-	// (for metadata extraction from the first message of any type).
+	// Claude: user/assistant entries and any line carrying session metadata.
+	// Pi: the session header and nested message entries.
 	return bytes.Contains(line, []byte(`"type":"user"`)) ||
 		bytes.Contains(line, []byte(`"type":"assistant"`)) ||
+		bytes.Contains(line, []byte(`"type":"message"`)) ||
+		bytes.Contains(line, []byte(`"type":"session"`)) ||
 		bytes.Contains(line, []byte(`"sessionId"`))
 }
 
@@ -897,6 +967,7 @@ type sessionMeta struct {
 	gitBranch   string
 	startedAt   string
 	updatedAt   string
+	provenance  string
 }
 
 type parsedMessage struct {
@@ -923,6 +994,7 @@ func extractSessionMeta(sess *sessionMeta, raw map[string]json.RawMessage) {
 	if sess.id == "" {
 		return
 	}
+	sess.provenance = "claude_code"
 
 	cwd := unquote(raw["cwd"])
 	if cwd != "" {
@@ -930,6 +1002,32 @@ func extractSessionMeta(sess *sessionMeta, raw map[string]json.RawMessage) {
 	}
 
 	sess.gitBranch = unquote(raw["gitBranch"])
+}
+
+func extractPiSessionMeta(sess *sessionMeta, raw map[string]json.RawMessage) {
+	id := unquote(raw["id"])
+	if id == "" {
+		return
+	}
+	sess.id = id
+	sess.provenance = "pi"
+	if cwd := unquote(raw["cwd"]); cwd != "" {
+		sess.projectPath, sess.projectName = resolveProject(cwd)
+	}
+	if ts := unquote(raw["timestamp"]); ts != "" {
+		sess.startedAt = ts
+		sess.updatedAt = ts
+	}
+}
+
+func updateSessionTimes(sess *sessionMeta, timestamp string) {
+	if timestamp == "" {
+		return
+	}
+	if sess.startedAt == "" {
+		sess.startedAt = timestamp
+	}
+	sess.updatedAt = timestamp
 }
 
 // resolveProject returns (projectPath, projectName) for a cwd, handling
@@ -985,37 +1083,7 @@ func parseAssistantMessage(raw map[string]json.RawMessage) (*parsedMessage, []pa
 	}
 
 	msgID := unquote(raw["uuid"])
-	var textParts []string
-	var tools []parsedToolUse
-
-	// Content can be a string or an array of content blocks.
-	var blocks []map[string]json.RawMessage
-	if err := json.Unmarshal(msgObj.Content, &blocks); err != nil {
-		// Try as string.
-		var s string
-		if err := json.Unmarshal(msgObj.Content, &s); err == nil && s != "" {
-			textParts = append(textParts, s)
-		}
-	} else {
-		for _, block := range blocks {
-			blockType := unquote(block["type"])
-			switch blockType {
-			case "text":
-				if t := unquote(block["text"]); t != "" {
-					textParts = append(textParts, t)
-				}
-			case "tool_use":
-				tu := parsedToolUse{
-					id:        unquote(block["id"]),
-					messageID: msgID,
-					toolName:  unquote(block["name"]),
-				}
-				tu.inputSummary = extractToolSummary(tu.toolName, block["input"])
-				tools = append(tools, tu)
-			}
-		}
-	}
-
+	textParts, tools := parseContentBlocks(msgObj.Content, msgID, "tool_use", "input")
 	content := strings.Join(textParts, "\n")
 	if content == "" && len(tools) == 0 {
 		return nil, nil
@@ -1033,6 +1101,96 @@ func parseAssistantMessage(raw map[string]json.RawMessage) (*parsedMessage, []pa
 	}
 
 	return msg, tools
+}
+
+// parsePiMessage converts pi's type=message envelope into the same user and
+// assistant rows used for Claude Code transcripts. Tool-result messages remain
+// excluded; assistant tool calls are retained as metadata.
+func parsePiMessage(
+	raw map[string]json.RawMessage,
+	sessionID string,
+) (*parsedMessage, []parsedToolUse) {
+	var msgObj struct {
+		Role    string `json:"role"`
+		Model   string `json:"model"`
+		Content json.RawMessage
+		Usage   struct {
+			Input  int `json:"input"`
+			Output int `json:"output"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(raw["message"], &msgObj); err != nil {
+		return nil, nil
+	}
+	if msgObj.Role != "user" && msgObj.Role != "assistant" {
+		return nil, nil
+	}
+
+	entryID := unquote(raw["id"])
+	msgID := piScopedID(sessionID, entryID)
+	parentID := piScopedID(sessionID, unquote(raw["parentId"]))
+	textParts, tools := parseContentBlocks(msgObj.Content, msgID, "toolCall", "arguments")
+	content := strings.Join(textParts, "\n")
+	if content == "" && len(tools) == 0 {
+		return nil, nil
+	}
+	for i := range tools {
+		tools[i].id = piScopedID(sessionID, tools[i].id)
+	}
+
+	return &parsedMessage{
+		id:           msgID,
+		parentID:     parentID,
+		role:         msgObj.Role,
+		content:      content,
+		timestamp:    unquote(raw["timestamp"]),
+		model:        msgObj.Model,
+		inputTokens:  msgObj.Usage.Input,
+		outputTokens: msgObj.Usage.Output,
+	}, tools
+}
+
+func piScopedID(sessionID, id string) string {
+	if id == "" {
+		return ""
+	}
+	return sessionID + ":" + id
+}
+
+// parseContentBlocks extracts searchable text and tool metadata from either
+// Claude's snake_case or pi's camelCase assistant content blocks.
+func parseContentBlocks(
+	contentRaw json.RawMessage,
+	messageID, toolBlockType, toolInputField string,
+) ([]string, []parsedToolUse) {
+	var textParts []string
+	var tools []parsedToolUse
+
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(contentRaw, &blocks); err != nil {
+		var s string
+		if json.Unmarshal(contentRaw, &s) == nil && s != "" {
+			textParts = append(textParts, s)
+		}
+		return textParts, tools
+	}
+	for _, block := range blocks {
+		switch unquote(block["type"]) {
+		case "text":
+			if text := unquote(block["text"]); text != "" {
+				textParts = append(textParts, text)
+			}
+		case toolBlockType:
+			tu := parsedToolUse{
+				id:        unquote(block["id"]),
+				messageID: messageID,
+				toolName:  unquote(block["name"]),
+			}
+			tu.inputSummary = extractToolSummary(tu.toolName, block[toolInputField])
+			tools = append(tools, tu)
+		}
+	}
+	return textParts, tools
 }
 
 // extractContent gets text from a message object's content field.
@@ -1091,16 +1249,17 @@ func extractToolSummary(toolName string, inputRaw json.RawMessage) string {
 		return ""
 	}
 
-	switch toolName {
-	case "Bash":
+	switch strings.ToLower(toolName) {
+	case "bash":
 		return unquote(input["command"])
-	case "Read", "Write", "Edit":
+	case "read", "write", "edit", "ls":
+		if path := unquote(input["path"]); path != "" {
+			return path
+		}
 		return unquote(input["file_path"])
-	case "Grep":
+	case "grep", "glob", "find":
 		return unquote(input["pattern"])
-	case "Glob":
-		return unquote(input["pattern"])
-	case "Agent":
+	case "agent":
 		return unquote(input["description"])
 	default:
 		return ""

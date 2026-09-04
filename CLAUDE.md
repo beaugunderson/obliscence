@@ -1,6 +1,6 @@
 # obliscence
 
-Go CLI for archiving and searching Claude Code conversations.
+Go CLI for archiving and searching Claude Code and pi conversations.
 
 ## Build
 
@@ -10,6 +10,8 @@ make build
 
 CGo required (mattn/go-sqlite3, sqlite-vec, daulet/tokenizers). The Makefile auto-downloads `libtokenizers.a` and sets `CGO_LDFLAGS`/`CGO_CFLAGS`.
 
+Run tests with `make test`; plain `go test` does not get the CGo linker flags or the `sqlite_fts5` tag.
+
 `--version` prints `main.version`, stamped by `-X main.version=...` from `git describe` in the Makefile and from the tag in goreleaser; an unstamped build falls back to the Go toolchain's embedded module version or VCS revision (`version.go`).
 
 ## Architecture
@@ -18,7 +20,7 @@ Flat structure, single package. Each file maps to a concern:
 
 - `main.go` — kong CLI dispatch
 - `db.go` — SQLite schema, open, RunContext
-- `index.go` — JSONL parsing, incremental indexing, embedding generation
+- `index.go` — Claude Code + pi JSONL parsing, incremental indexing, embedding generation
 - `import.go` — claude.ai data-export ingestion (zip/dir/conversations.json → sessions/messages, idempotent via uuid keys + upsert); shares the embed pass with `index`
 - `search.go` — FTS5 search, semantic search, hybrid (RRF) search
 - `corrections.go` — lexical detector for user messages that correct/push back on the assistant
@@ -50,14 +52,16 @@ Flat structure, single package. Each file maps to a concern:
   - the embed pass runs newest message first, so a large backlog makes recent work searchable before old history
   - every `index` run starts with `pruneOrphanVectors`: vectors, owner-map rows, and `embedded_messages` rows whose message is gone are deleted by rowid. Orphans take top-k slots in vector search and are then filtered out, shrinking results without saying so
   - `tool_uses(message_id)` is indexed because the delete cascade from messages runs one `DELETE ... WHERE message_id = ?` per message; unindexed it full-scans `tool_uses` per message (58ms each on a 215k-row table). A test asserts the cascade's query plan has no `SCAN tool_uses`
-- Every `~/.claude*/projects` directory is indexed (`.claude`, `.claude-personal`, `.claude-teams`, ...), auto-discovered by glob so a new profile needs no config. Sessions key on UUID and files on absolute path, so roots coexist without collision. Only `<root>/<project>/*.jsonl` is scanned, and `agent-*.jsonl` (top-level or under `subagents/`) is skipped: subagent transcripts are stamped with the parent's `sessionId`, so indexing one would clobber the parent session
-  - the session id comes from the file name when it is a UUID (`sessionIDFromPath`), not from the lines: a forked session's transcript starts with lines copied from its parent that still carry the parent's `sessionId`
-- `resume` derives the owning profile from the session's `source_path` (the dir above `projects/`) when launching `claude --resume`. A non-default profile is passed as `CLAUDE_CONFIG_DIR`; the default `~/.claude` instead strips any inherited `CLAUDE_CONFIG_DIR` so Claude Code falls back to `~/.claude` and its `~/.claude.json` machine state (setting `CLAUDE_CONFIG_DIR=~/.claude` would wrongly redirect it to `~/.claude/.claude.json`)
+- Every `~/.claude*/projects` directory is indexed (`.claude`, `.claude-personal`, `.claude-teams`, ...), auto-discovered by glob so a new profile needs no config. Pi's default `~/.pi/agent/sessions` plus its configured `sessionDir`/`PI_CODING_AGENT_SESSION_DIR` are indexed too. Sessions key on UUID and files on absolute path, so roots coexist without collision. Only `<root>/<project>/*.jsonl` is scanned, and Claude `agent-*.jsonl` files are skipped: subagent transcripts are stamped with the parent's `sessionId`, so indexing one would clobber the parent session
+  - the session id comes from the file name when it contains a UUID (`sessionIDFromPath` understands Claude's `<uuid>.jsonl` and pi's `<timestamp>_<uuid>.jsonl`), not from Claude transcript lines: a fork starts with copied lines carrying its parent's `sessionId`
+  - pi's 8-character entry IDs are namespaced by session UUID before insertion because `messages.id` is globally unique
+- `resume` dispatches by provenance: pi sessions launch `pi --session <source_path>`; Claude Code sessions derive the owning profile from `source_path` (the dir above `projects/`) and launch `claude --resume`. A non-default Claude profile is passed as `CLAUDE_CONFIG_DIR`; the default `~/.claude` instead strips any inherited `CLAUDE_CONFIG_DIR` so Claude Code falls back to `~/.claude` and its `~/.claude.json` machine state (setting `CLAUDE_CONFIG_DIR=~/.claude` would wrongly redirect it to `~/.claude/.claude.json`)
 - Project name derived from `cwd` field in JSONL messages (`filepath.Base(cwd)`)
 - Hook handler swallows all errors to avoid Claude Code's false "hook error" label bug
+- `setup` installs Claude hooks plus a pi lifecycle extension so both agents trigger incremental indexing. `piExtensionContent` in `setup.go` is the extension source of truth
 - `skillContent` in `setup.go` is the source of truth for the `/search-history` skill: `setup` overwrites the installed copy, so edit the template, never `~/.claude/skills/`. A test asserts every search flag appears there or is listed in `skillOmits` with a reason, so a new flag can't ship without a skill decision
   - each `~/.claude*` profile symlinks `skills` to `~/.claude/skills`, so one write reaches every profile
-- User + assistant messages indexed; tool output excluded (too noisy)
+- User + assistant messages indexed; tool output and assistant thinking blocks excluded (too noisy/sensitive)
 - Tool uses stored as metadata only (tool name + summarized input)
 - Empty-content messages skipped during embedding and filtered from search results
 - `corrections` is a deterministic lexical scorer (no model): weighted negation/imperative/frustration cues + emphasis, gated by a length cap and `is_compact_summary` exclusion to drop injected skill/summary/agent text. Finds a speech-act that keyword/semantic search can't

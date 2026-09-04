@@ -21,6 +21,7 @@ type UninstallCmd struct{}
 
 func (cmd *UninstallCmd) Run(rc *RunContext) error {
 	cmd.removeHooks()
+	cmd.removePiExtension()
 	cmd.removeSkill()
 	cmd.removeModels()
 
@@ -188,6 +189,7 @@ func (cmd *SetupCmd) Run(rc *RunContext) error {
 	}
 
 	cmd.installHooks()
+	cmd.installPiExtension()
 	cmd.installSkill()
 
 	fmt.Fprintln(os.Stderr, "setup complete. run 'obliscence index' to generate embeddings.")
@@ -252,6 +254,71 @@ func (cmd *SetupCmd) installHooks() {
 	fmt.Fprintln(os.Stderr, "installed hooks in ~/.claude/settings.json")
 }
 
+const piExtensionContent = `import { spawn } from "node:child_process";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+function runHook(ctx: ExtensionContext, eventName: "SessionStart" | "SessionEnd") {
+  const sessionFile = ctx.sessionManager.getSessionFile();
+  if (eventName === "SessionEnd" && !sessionFile) return;
+
+  const child = spawn("obliscence", ["hook"], {
+    detached: true,
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  child.on("error", () => {});
+  child.stdin?.on("error", () => {});
+  child.stdin?.end(JSON.stringify({
+    hook_event_name: eventName,
+    session_id: ctx.sessionManager.getSessionId(),
+    transcript_path: eventName === "SessionEnd" ? sessionFile : undefined,
+    cwd: ctx.cwd,
+  }));
+  child.unref();
+}
+
+export default function (pi: ExtensionAPI) {
+  pi.on("session_start", (_event, ctx) => runHook(ctx, "SessionStart"));
+  pi.on("session_shutdown", (_event, ctx) => runHook(ctx, "SessionEnd"));
+}
+`
+
+func piAgentDir() string {
+	if dir := os.Getenv("PI_CODING_AGENT_DIR"); dir != "" {
+		return expandPath(dir)
+	}
+	return expandPath("~/.pi/agent")
+}
+
+func (cmd *SetupCmd) installPiExtension() {
+	path := filepath.Join(piAgentDir(), "extensions", "obliscence.ts")
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == piExtensionContent {
+		fmt.Fprintln(os.Stderr, "pi extension already up to date")
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not create pi extensions dir: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(path, []byte(piExtensionContent), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write pi extension: %v\n", err)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "installed extension at ~/.pi/agent/extensions/obliscence.ts")
+}
+
+func (cmd *UninstallCmd) removePiExtension() {
+	path := filepath.Join(piAgentDir(), "extensions", "obliscence.ts")
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "pi extension not installed, skipping")
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: could not remove pi extension: %v\n", err)
+		}
+		return
+	}
+	fmt.Fprintln(os.Stderr, "removed ~/.pi/agent/extensions/obliscence.ts")
+}
+
 const skillContent = `---
 name: search-history
 description: >-
@@ -263,7 +330,7 @@ description: >-
   "audit my CLAUDE.md", "what rules/preferences am I missing", "what do I push back on".
 ---
 
-Search past Claude Code conversations using obliscence. Use ` + "`--json`" + ` for structured output,
+Search past Claude Code and pi conversations using obliscence. Use ` + "`--json`" + ` for structured output,
 ` + "`--semantic`" + ` for meaning-based search, ` + "`--hybrid`" + ` for best results combining keyword + semantic.
 
 ## Choosing a search mode
@@ -297,8 +364,8 @@ obliscence search "$QUERY" --hybrid --role user --json
 # Filter by date range
 obliscence search "$QUERY" --hybrid --after 2026-01-01 --before 2026-04-01 --json
 
-# Filter by where the conversation happened: claude.ai web chats vs local Claude Code
-obliscence search "$QUERY" --hybrid --source claude.ai --json
+# Filter by where the conversation happened: claude.ai, Claude Code, or pi
+obliscence search "$QUERY" --hybrid --source pi --json
 
 # Sort by recency instead of relevance — use for "last time I mentioned X" queries
 # where the user wants the most recent match, not the most relevant one

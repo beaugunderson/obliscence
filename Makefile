@@ -1,4 +1,4 @@
-.PHONY: build install clean setup-lib
+.PHONY: build install test clean setup-lib
 
 CGO_LDFLAGS ?= -L$(CURDIR)/lib -Wl,-no_warn_duplicate_libraries
 CGO_CFLAGS ?= -Wno-deprecated-declarations
@@ -12,6 +12,9 @@ build: setup-lib
 
 install: setup-lib
 	go install -tags "sqlite_fts5" -ldflags "$(LDFLAGS)" .
+
+test: setup-lib
+	go test -tags "sqlite_fts5" ./...
 
 # Download prebuilt libtokenizers if missing.
 setup-lib:
