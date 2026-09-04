@@ -36,7 +36,7 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     name: obliscence
     homepage: https://github.com/beaugunderson/obliscence
-    description: Archive and search Claude Code conversations
+    description: Archive and search Claude Code and pi conversations
     license: MIT
     install: |
       bin.install "obliscence"
