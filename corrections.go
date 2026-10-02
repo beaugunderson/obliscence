@@ -155,6 +155,9 @@ func countShoutedWords(s string) int {
 }
 
 func (cmd *CorrectionsCmd) Run(rc *RunContext) error {
+	if err := checkProject(rc.DB, cmd.Project); err != nil {
+		return err
+	}
 	var where []string
 	var args []interface{}
 	where = append(where, "m.role = 'user'")

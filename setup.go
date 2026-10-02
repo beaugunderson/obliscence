@@ -333,6 +333,12 @@ description: >-
 Search past Claude Code and pi conversations using obliscence. Use ` + "`--json`" + ` for structured output,
 ` + "`--semantic`" + ` for meaning-based search, ` + "`--hybrid`" + ` for best results combining keyword + semantic.
 
+` + "`--json`" + ` output is a bare top-level array with no wrapper object, so iterate with ` + "`jq '.[]'`" + `:
+- ` + "`search`" + ` and ` + "`corrections`" + `: ` + "`[{session_id, project, role, timestamp, snippet, score, git_branch, message_id}]`" + `; the text is in ` + "`snippet`" + `
+- ` + "`sessions`" + `: ` + "`[{id, project, model, git_branch, started_at, updated_at, messages}]`" + `
+
+` + "`--project`" + ` is a substring match on the names ` + "`obliscence projects`" + ` prints (` + "`my-app`" + `, not the ` + "`-Users-me-p-my-app`" + ` form of Claude Code's project directories). A value that matches no project exits 1 and suggests the closest names.
+
 ## Choosing a search mode
 
 - **Keyword search** (default): Best when the user remembers specific terms, error messages, file names, or tool names.

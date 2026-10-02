@@ -24,7 +24,51 @@ type SessionRow struct {
 	Messages    int    `json:"messages"`
 }
 
+// checkProject errors when a --project filter matches no project, so a mistyped
+// name fails loudly instead of returning an empty result that reads as "no hits".
+func checkProject(db *sql.DB, project string) error {
+	if project == "" {
+		return nil
+	}
+	var n int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM sessions WHERE project_name LIKE ?", "%"+project+"%",
+	).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT DISTINCT project_name FROM sessions
+		WHERE length(project_name) >= 3 AND ? LIKE '%' || project_name || '%'
+		ORDER BY length(project_name) DESC LIMIT 5`, project)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var near []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		near = append(near, name)
+	}
+	hint := ""
+	if len(near) > 0 {
+		hint = fmt.Sprintf(" (did you mean %s?)", strings.Join(near, ", "))
+	}
+	return fmt.Errorf(
+		"no project matches %q%s; run 'obliscence projects' for names",
+		project,
+		hint,
+	)
+}
+
 func (cmd *SessionsCmd) Run(rc *RunContext) error {
+	if err := checkProject(rc.DB, cmd.Project); err != nil {
+		return err
+	}
 	var where []string
 	var args []interface{}
 

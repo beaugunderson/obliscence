@@ -79,6 +79,9 @@ func (cmd *SearchCmd) Run(rc *RunContext) error {
 	if err := cmd.validate(); err != nil {
 		return err
 	}
+	if err := checkProject(rc.DB, cmd.Project); err != nil {
+		return err
+	}
 	prov, err := normalizeProvenance(cmd.Source)
 	if err != nil {
 		return err
