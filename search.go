@@ -320,6 +320,18 @@ func (cmd *SearchCmd) ftsResults(rc *RunContext, limit int) ([]SearchResult, err
 		return nil, nil
 	}
 
+	query, args := cmd.ftsSQL(match, limit)
+	rows, err := rc.DB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanResults(rows)
+}
+
+// ftsSQL builds the keyword query for an FTS5 match expression.
+func (cmd *SearchCmd) ftsSQL(match string, limit int) (string, []interface{}) {
 	where := []string{"messages_fts MATCH ?"}
 	args := []interface{}{match}
 
@@ -331,14 +343,18 @@ func (cmd *SearchCmd) ftsResults(rc *RunContext, limit int) ([]SearchResult, err
 	if cmd.Sort == "recent" {
 		orderBy = "m.timestamp DESC"
 	}
+	// CROSS JOIN pins the join order (SQLite never reorders it), so the match
+	// drives and each hit reaches its message by rowid. Left to choose, the
+	// planner starts from an indexed scope flag such as role and probes the match
+	// once per message carrying that value.
 	query := fmt.Sprintf(`
 		SELECT
 			m.id, m.session_id, s.project_name, m.role, m.timestamp,
 			snippet(messages_fts, 0, char(2), char(3), '...', 32) as snip,
 			bm25(messages_fts) as score, s.git_branch
 		FROM messages_fts
-		JOIN messages m ON m.rowid = messages_fts.rowid
-		JOIN sessions s ON s.id = m.session_id
+		CROSS JOIN messages m ON m.rowid = messages_fts.rowid
+		CROSS JOIN sessions s ON s.id = m.session_id
 		WHERE %s
 		ORDER BY %s
 		LIMIT ?`,
@@ -346,14 +362,41 @@ func (cmd *SearchCmd) ftsResults(rc *RunContext, limit int) ([]SearchResult, err
 		orderBy,
 	)
 	args = append(args, limit)
+	return query, args
+}
 
-	rows, err := rc.DB.Query(query, args...)
-	if err != nil {
-		return nil, err
+// vectorSQL builds the KNN query for the k nearest chunks to a serialized
+// query vector.
+func (cmd *SearchCmd) vectorSQL(serialized []byte, k int) (string, []interface{}) {
+	where := "embedding MATCH ? AND k = ?"
+	args := []interface{}{serialized, k}
+
+	// Scope flags constrain the candidate set, not the results: post-filtering a
+	// KNN result lets excluded rows consume the k slots, so a scoped search
+	// silently returns fewer hits than exist. vec0 rejects a WHERE constraint on
+	// an auxiliary column (message_rowid), but accepts a `rowid IN (...)`
+	// prefilter, so resolve the filters to chunk rowids in a subquery. Reading
+	// the auxiliary columns back is a scan of them alone (no vectors); the CTE is
+	// MATERIALIZED so the planner cannot push the join back down onto them, and
+	// CROSS JOIN pins the chunk list as the driver: it has no index, so starting
+	// from an indexed scope flag such as role scans it once per message.
+	if filters, filterArgs := cmd.filterClauses(); len(filters) > 0 {
+		where += fmt.Sprintf(` AND rowid IN (
+			WITH chunks AS MATERIALIZED (
+				SELECT rowid AS vec_rowid, message_rowid FROM messages_vec
+			)
+			SELECT c.vec_rowid FROM chunks c
+			CROSS JOIN messages m ON m.rowid = c.message_rowid
+			CROSS JOIN sessions s ON s.id = m.session_id
+			WHERE %s)`, strings.Join(filters, " AND "))
+		args = append(args, filterArgs...)
 	}
-	defer rows.Close()
 
-	return scanResults(rows)
+	return fmt.Sprintf(
+		`SELECT message_rowid, chunk_start, chunk_end, distance
+		 FROM messages_vec
+		 WHERE %s
+		 ORDER BY distance`, where), args
 }
 
 // vectorResults returns up to limit nearest-neighbor hits.
@@ -382,33 +425,8 @@ func (cmd *SearchCmd) vectorResults(
 		)
 	}
 
-	where := "embedding MATCH ? AND k = ?"
-	args := []interface{}{serialized, k}
-
-	// Scope flags constrain the candidate set, not the results: post-filtering a
-	// KNN result lets excluded rows consume the k slots, so a scoped search
-	// silently returns fewer hits than exist. vec0 rejects a WHERE constraint on
-	// an auxiliary column (message_rowid), but accepts a `rowid IN (...)`
-	// prefilter, so resolve the filters to chunk rowids in a subquery. Reading
-	// the auxiliary columns back is a scan of them alone (no vectors); the CTE is
-	// MATERIALIZED so the planner cannot push the join back down onto them.
-	if filters, filterArgs := cmd.filterClauses(); len(filters) > 0 {
-		where += fmt.Sprintf(` AND rowid IN (
-			WITH chunks AS MATERIALIZED (
-				SELECT rowid AS vec_rowid, message_rowid FROM messages_vec
-			)
-			SELECT c.vec_rowid FROM chunks c
-			JOIN messages m ON m.rowid = c.message_rowid
-			JOIN sessions s ON s.id = m.session_id
-			WHERE %s)`, strings.Join(filters, " AND "))
-		args = append(args, filterArgs...)
-	}
-
-	rows, err := rc.DB.Query(fmt.Sprintf(
-		`SELECT message_rowid, chunk_start, chunk_end, distance
-		 FROM messages_vec
-		 WHERE %s
-		 ORDER BY distance`, where), args...)
+	query, args := cmd.vectorSQL(serialized, k)
+	rows, err := rc.DB.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -190,6 +190,86 @@ func TestFiltersConstrainEveryRetrievalMode(t *testing.T) {
 	}
 }
 
+// TestFiltersNeverDriveTheJoin guards the join order of both retrieval queries.
+// The match (FTS) or the chunk list (vector) must drive, reaching messages by
+// rowid. A scope flag with an index of its own, like role, otherwise looks like
+// a cheap starting point to the planner: it walks every message with that role
+// and probes the match once per row, which takes minutes on a real index.
+func TestFiltersNeverDriveTheJoin(t *testing.T) {
+	db, err := openDB(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+	defer db.Close()
+
+	vec, err := serializeVec(make([]float32, embeddingDim))
+	if err != nil {
+		t.Fatalf("serializeVec: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		cmd  SearchCmd
+	}{
+		{"role", SearchCmd{Role: "assistant"}},
+		{"after", SearchCmd{After: "2026-07-18"}},
+		{"before", SearchCmd{Before: "2026-07-18"}},
+		{"project", SearchCmd{Project: "proj"}},
+		{"source", SearchCmd{prov: "claude_code"}},
+		{
+			"all",
+			SearchCmd{
+				Role:    "assistant",
+				After:   "2026-07-18",
+				Before:  "2026-08-18",
+				Project: "proj",
+				prov:    "claude_code",
+			},
+		},
+	}
+
+	const byRowid = "SEARCH m USING INTEGER PRIMARY KEY"
+	for _, c := range cases {
+		ftsSQL, ftsArgs := c.cmd.ftsSQL("delete AND files", 16)
+		vecSQL, vecArgs := c.cmd.vectorSQL(vec, 64)
+		queries := []struct {
+			name string
+			sql  string
+			args []interface{}
+		}{
+			{"keyword", ftsSQL, ftsArgs},
+			{"vector", vecSQL, vecArgs},
+		}
+		for _, q := range queries {
+			t.Run(q.name+"/"+c.name, func(t *testing.T) {
+				rows, err := db.Query("EXPLAIN QUERY PLAN "+q.sql, q.args...)
+				if err != nil {
+					t.Fatalf("explain: %v", err)
+				}
+				defer rows.Close()
+
+				sawRowid := false
+				for rows.Next() {
+					var id, parent, notused int
+					var detail string
+					if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+						t.Fatalf("scan: %v", err)
+					}
+					if strings.HasPrefix(detail, byRowid) {
+						sawRowid = true
+					} else if strings.HasPrefix(detail, "SEARCH m ") ||
+						detail == "SCAN m" || strings.HasPrefix(detail, "SCAN m ") {
+						t.Errorf("messages drives the join instead of the match: %q", detail)
+					}
+				}
+				if !sawRowid {
+					t.Errorf("plan never reaches messages by rowid")
+				}
+			})
+		}
+	}
+}
+
 // TestFiltersConstrainCandidateSetNotResults pins the filter to the retrieval
 // step rather than the results. When the nearest neighbors are all out of scope,
 // a post-filter discards them and returns nothing; filtering the candidate set
