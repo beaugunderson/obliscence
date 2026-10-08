@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -60,6 +61,147 @@ func TestPiExtensionIndexesLifecycle(t *testing.T) {
 		if !strings.Contains(piExtensionContent, want) {
 			t.Errorf("pi extension missing %q", want)
 		}
+	}
+}
+
+// settingsWith writes a settings.json under a temporary HOME and returns its
+// path.
+func settingsWith(t *testing.T, content string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// hookCommands lists every command an event's matcher groups run, in order.
+func hookCommands(t *testing.T, path, event string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	var commands []string
+	for _, group := range settings.Hooks[event] {
+		for _, hook := range group.Hooks {
+			commands = append(commands, hook.Command)
+		}
+	}
+	return commands
+}
+
+const ownHooks = `{
+  "model": "opus",
+  "hooks": {
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "my-session-start"}]}],
+    "PreCompact": [{"matcher": "auto", "hooks": [{"type": "command", "command": "my-pre-compact"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "my-stop"}]}]
+  }
+}`
+
+// A person's own hooks on the events obliscence uses run beside it, not
+// instead of it.
+func TestInstallHooksKeepsAPersonsOwnHooks(t *testing.T) {
+	path := settingsWith(t, ownHooks)
+
+	(&SetupCmd{}).installHooks()
+
+	for event, want := range map[string][]string{
+		"SessionStart": {"my-session-start", "obliscence hook"},
+		"SessionEnd":   {"obliscence hook"},
+		"PreCompact":   {"my-pre-compact", "obliscence hook"},
+		"Stop":         {"my-stop"},
+	} {
+		if got := hookCommands(t, path, event); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s hooks = %q, want %q", event, got, want)
+		}
+	}
+
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"model": "opus"`) {
+		t.Errorf("lost an unrelated key:\n%s", data)
+	}
+}
+
+func TestInstallHooksTwiceAddsOneEntry(t *testing.T) {
+	path := settingsWith(t, ownHooks)
+
+	(&SetupCmd{}).installHooks()
+	(&SetupCmd{}).installHooks()
+
+	want := []string{"my-session-start", "obliscence hook"}
+	if got := hookCommands(t, path, "SessionStart"); !reflect.DeepEqual(got, want) {
+		t.Errorf("SessionStart hooks = %q, want %q", got, want)
+	}
+}
+
+// Uninstalling takes out obliscence's entries and nothing else, including a
+// person's hook sharing a matcher group with one.
+func TestRemoveHooksKeepsAPersonsOwnHooks(t *testing.T) {
+	path := settingsWith(t, `{
+  "hooks": {
+    "SessionStart": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "my-session-start"}]},
+      {"matcher": "", "hooks": [{"type": "command", "command": "obliscence hook", "async": true}]}
+    ],
+    "SessionEnd": [
+      {"matcher": "", "hooks": [
+        {"type": "command", "command": "obliscence hook", "async": true},
+        {"type": "command", "command": "my-session-end"}
+      ]}
+    ],
+    "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "obliscence hook"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "my-stop"}]}]
+  }
+}`)
+
+	(&UninstallCmd{}).removeHooks()
+
+	for event, want := range map[string][]string{
+		"SessionStart": {"my-session-start"},
+		"SessionEnd":   {"my-session-end"},
+		"PreCompact":   nil,
+		"Stop":         {"my-stop"},
+	} {
+		if got := hookCommands(t, path, event); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s hooks = %q, want %q", event, got, want)
+		}
+	}
+
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "PreCompact") {
+		t.Errorf("left an empty PreCompact event:\n%s", data)
+	}
+}
+
+func TestRemoveHooksDropsTheHooksKeyWhenNothingIsLeft(t *testing.T) {
+	path := settingsWith(t, `{"model": "opus"}`)
+	(&SetupCmd{}).installHooks()
+
+	(&UninstallCmd{}).removeHooks()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "hooks") {
+		t.Errorf("left an empty hooks key:\n%s", data)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -60,15 +61,46 @@ func (cmd *UninstallCmd) removeHooks() {
 		return
 	}
 
+	// Only obliscence's own entries come out. A person's hooks on the same
+	// events stay, including one sharing a matcher group with obliscence's.
 	changed := false
-	for _, event := range []string{"SessionStart", "SessionEnd", "PreCompact"} {
-		existing, ok := hooks[event]
+	for _, event := range hookEvents {
+		raw, ok := hooks[event]
 		if !ok {
 			continue
 		}
-		if strings.Contains(string(existing), "obliscence hook") {
+		var groups []map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &groups); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not parse %s hooks, leaving them\n", event)
+			continue
+		}
+
+		kept := groups[:0]
+		for _, group := range groups {
+			var entries []json.RawMessage
+			if err := json.Unmarshal(group["hooks"], &entries); err != nil {
+				kept = append(kept, group)
+				continue
+			}
+			others := entries[:0]
+			for _, entry := range entries {
+				if isObliscenceHook(entry) {
+					changed = true
+					continue
+				}
+				others = append(others, entry)
+			}
+			if len(others) == 0 && len(entries) > 0 {
+				continue
+			}
+			group["hooks"], _ = json.Marshal(others)
+			kept = append(kept, group)
+		}
+
+		if len(kept) == 0 {
 			delete(hooks, event)
-			changed = true
+		} else {
+			hooks[event], _ = json.Marshal(kept)
 		}
 	}
 
@@ -196,7 +228,24 @@ func (cmd *SetupCmd) Run(rc *RunContext) error {
 	return nil
 }
 
-// installHooks adds SessionStart, SessionEnd, and PreCompact hooks to ~/.claude/settings.json.
+// hookEvents are the Claude Code events obliscence indexes on.
+var hookEvents = []string{"SessionStart", "SessionEnd", "PreCompact"}
+
+// isObliscenceHook reports whether one hook entry in a matcher group is
+// obliscence's.
+func isObliscenceHook(entry json.RawMessage) bool {
+	var hook struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(entry, &hook); err != nil {
+		return false
+	}
+	return strings.Contains(hook.Command, "obliscence hook")
+}
+
+// installHooks adds obliscence's matcher group to the SessionStart,
+// SessionEnd, and PreCompact hooks in ~/.claude/settings.json, beside any
+// hooks a person already has on those events.
 func (cmd *SetupCmd) installHooks() {
 	settingsPath := expandPath("~/.claude/settings.json")
 
@@ -219,17 +268,40 @@ func (cmd *SetupCmd) installHooks() {
 		hooks = make(map[string]json.RawMessage)
 	}
 
-	hookEntry := json.RawMessage(
-		`[{"matcher":"","hooks":[{"type":"command","command":"obliscence hook","async":true,"suppressOutput":true}]}]`,
+	group := json.RawMessage(
+		`{"matcher":"","hooks":[{"type":"command","command":"obliscence hook","async":true,"suppressOutput":true}]}`,
 	)
 
 	changed := false
-	for _, event := range []string{"SessionStart", "SessionEnd", "PreCompact"} {
-		existing, _ := hooks[event]
-		if existing != nil && strings.Contains(string(existing), "obliscence hook") {
+	for _, event := range hookEvents {
+		var groups []json.RawMessage
+		if raw, ok := hooks[event]; ok {
+			if err := json.Unmarshal(raw, &groups); err != nil {
+				fmt.Fprintf(
+					os.Stderr,
+					"warning: could not parse %s hooks, skipping that event\n",
+					event,
+				)
+				continue
+			}
+		}
+
+		present := false
+		for _, g := range groups {
+			var parsed struct {
+				Hooks []json.RawMessage `json:"hooks"`
+			}
+			json.Unmarshal(g, &parsed)
+			if slices.ContainsFunc(parsed.Hooks, isObliscenceHook) {
+				present = true
+				break
+			}
+		}
+		if present {
 			continue
 		}
-		hooks[event] = hookEntry
+
+		hooks[event], _ = json.Marshal(append(groups, group))
 		changed = true
 	}
 

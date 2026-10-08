@@ -92,7 +92,7 @@ obliscence search "terraform" --json | jq '.[].snippet'
 `obliscence setup` does everything:
 
 1. Downloads ONNX Runtime + snowflake-arctic-embed-s model + tokenizer for semantic search
-2. Installs Claude Code hooks in `~/.claude/settings.json`:
+2. Installs Claude Code hooks in `~/.claude/settings.json`, beside any hooks already on those events:
    - `SessionStart` — runs a full incremental scan (with embeddings) to catch any sessions that ended without firing `SessionEnd` (terminal closed, process killed, etc.)
    - `SessionEnd` — indexes the conversation when a session ends cleanly
    - `PreCompact` — indexes before context compaction so no messages are lost
@@ -102,7 +102,7 @@ obliscence search "terraform" --json | jq '.[].snippet'
 
 All inference runs locally — no API calls, no server process.
 
-To remove everything: `obliscence uninstall` (removes hooks, skill, and downloaded models).
+To remove everything: `obliscence uninstall` (removes its own hooks, skill, and downloaded models; other hooks stay).
 
 ## Semantic search
 
