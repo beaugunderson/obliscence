@@ -96,8 +96,8 @@ obliscence search "terraform" --json | jq '.[].snippet'
    - `SessionStart` — runs a full incremental scan (with embeddings) to catch any sessions that ended without firing `SessionEnd` (terminal closed, process killed, etc.)
    - `SessionEnd` — indexes the conversation when a session ends cleanly
    - `PreCompact` — indexes before context compaction so no messages are lost
-   - All run `obliscence hook` asynchronously with suppressed output
-3. Installs a pi extension at `~/.pi/agent/extensions/obliscence.ts` that runs the same incremental scan on session start and indexes the current transcript on shutdown
+   - All run `obliscence hook` asynchronously with suppressed output; on macOS it runs under `taskpolicy -c background`, which keeps indexing and embedding on the efficiency cores. Rerunning setup rewrites an older obliscence entry to the current command
+3. Installs a pi extension at `~/.pi/agent/extensions/obliscence.ts` that runs the same incremental scan on session start and indexes the current transcript on shutdown, with the same efficiency-core clamp on macOS
 4. Installs the `/search-history` skill so Claude uses obliscence proactively
 
 All inference runs locally — no API calls, no server process.

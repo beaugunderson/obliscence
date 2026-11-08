@@ -30,6 +30,7 @@ Flat structure, single package. Each file maps to a concern:
 - `embed.go` — ONNX Runtime embedding pipeline (tokenize → infer → CLS pool → L2 normalize), plus message chunking
 - `setup.go` — download ONNX Runtime + snowflake-arctic-embed-s model + tokenizer.json
 - `resume.go` — resume a session in Claude Code
+- `research/embed-bench/` — standalone Python (uv) harness that benchmarks the production embedder against a candidate model on the live index, read-only; see its README
 
 ## Key design decisions
 
@@ -60,6 +61,8 @@ Flat structure, single package. Each file maps to a concern:
 - Project name derived from `cwd` field in JSONL messages (`filepath.Base(cwd)`)
 - Hook handler swallows all errors to avoid Claude Code's false "hook error" label bug
 - `setup` installs Claude hooks plus a pi lifecycle extension so both agents trigger incremental indexing. `piExtensionContent` in `setup.go` is the extension source of truth
+- `hookCommand` in `setup.go` is the source of truth for what every installed hook runs. A change to it (wrapper, flags, priority) goes there and in `piExtensionContent`, never only into `~/.claude/settings.json`: setup rewrites existing obliscence entries to `hookCommand`, so a hand edit is lost or never reaches other machines
+  - on macOS it is `taskpolicy -c background obliscence hook`, which keeps the SessionStart embed pass on efficiency cores instead of ~5 performance cores
 - `skillContent` in `setup.go` is the source of truth for the `/search-history` skill: `setup` overwrites the installed copy, so edit the template, never `~/.claude/skills/`. A test asserts every search flag appears there or is listed in `skillOmits` with a reason, so a new flag can't ship without a skill decision
   - each `~/.claude*` profile symlinks `skills` to `~/.claude/skills`, so one write reaches every profile
 - User + assistant messages indexed; tool output and assistant thinking blocks excluded (too noisy/sensitive)

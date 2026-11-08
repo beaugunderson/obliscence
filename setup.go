@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 )
 
@@ -243,6 +242,49 @@ func isObliscenceHook(entry json.RawMessage) bool {
 	return strings.Contains(hook.Command, "obliscence hook")
 }
 
+// hookCommand is the command each Claude Code hook runs. On macOS the
+// background QoS clamp keeps indexing and embedding on the efficiency cores,
+// so a session start never takes performance cores from interactive work.
+func hookCommand() string {
+	if runtime.GOOS == "darwin" {
+		return "taskpolicy -c background obliscence hook"
+	}
+	return "obliscence hook"
+}
+
+// upgradeHookCommand rewrites obliscence's entries in one matcher group to the
+// current hookCommand. It reports whether the group holds an obliscence entry
+// and whether any entry changed; every other field passes through untouched.
+func upgradeHookCommand(group json.RawMessage) (json.RawMessage, bool, bool) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(group, &fields); err != nil {
+		return group, false, false
+	}
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(fields["hooks"], &entries); err != nil {
+		return group, false, false
+	}
+	want, _ := json.Marshal(hookCommand())
+	present, changed := false, false
+	for _, entry := range entries {
+		raw, _ := json.Marshal(entry)
+		if !isObliscenceHook(raw) {
+			continue
+		}
+		present = true
+		if string(entry["command"]) != string(want) {
+			entry["command"] = want
+			changed = true
+		}
+	}
+	if !changed {
+		return group, present, false
+	}
+	fields["hooks"], _ = json.Marshal(entries)
+	out, _ := json.Marshal(fields)
+	return out, present, true
+}
+
 // installHooks adds obliscence's matcher group to the SessionStart,
 // SessionEnd, and PreCompact hooks in ~/.claude/settings.json, beside any
 // hooks a person already has on those events.
@@ -268,9 +310,15 @@ func (cmd *SetupCmd) installHooks() {
 		hooks = make(map[string]json.RawMessage)
 	}
 
-	group := json.RawMessage(
-		`{"matcher":"","hooks":[{"type":"command","command":"obliscence hook","async":true,"suppressOutput":true}]}`,
-	)
+	group, _ := json.Marshal(map[string]any{
+		"matcher": "",
+		"hooks": []map[string]any{{
+			"type":           "command",
+			"command":        hookCommand(),
+			"async":          true,
+			"suppressOutput": true,
+		}},
+	})
 
 	changed := false
 	for _, event := range hookEvents {
@@ -286,15 +334,16 @@ func (cmd *SetupCmd) installHooks() {
 			}
 		}
 
+		// An existing obliscence entry is rewritten to the current command in
+		// place, so rerunning setup upgrades an older install.
 		present := false
-		for _, g := range groups {
-			var parsed struct {
-				Hooks []json.RawMessage `json:"hooks"`
-			}
-			json.Unmarshal(g, &parsed)
-			if slices.ContainsFunc(parsed.Hooks, isObliscenceHook) {
-				present = true
-				break
+		for i, g := range groups {
+			upgraded, has, rewrote := upgradeHookCommand(g)
+			present = present || has
+			if rewrote {
+				groups[i] = upgraded
+				hooks[event], _ = json.Marshal(groups)
+				changed = true
 			}
 		}
 		if present {
@@ -333,7 +382,13 @@ function runHook(ctx: ExtensionContext, eventName: "SessionStart" | "SessionEnd"
   const sessionFile = ctx.sessionManager.getSessionFile();
   if (eventName === "SessionEnd" && !sessionFile) return;
 
-  const child = spawn("obliscence", ["hook"], {
+  // On macOS the background QoS clamp keeps indexing on the efficiency cores.
+  const child = process.platform === "darwin"
+    ? spawn("taskpolicy", ["-c", "background", "obliscence", "hook"], {
+      detached: true,
+      stdio: ["pipe", "ignore", "ignore"],
+    })
+    : spawn("obliscence", ["hook"], {
     detached: true,
     stdio: ["pipe", "ignore", "ignore"],
   });

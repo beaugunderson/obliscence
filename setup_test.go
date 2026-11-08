@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode"
@@ -123,9 +124,9 @@ func TestInstallHooksKeepsAPersonsOwnHooks(t *testing.T) {
 	(&SetupCmd{}).installHooks()
 
 	for event, want := range map[string][]string{
-		"SessionStart": {"my-session-start", "obliscence hook"},
-		"SessionEnd":   {"obliscence hook"},
-		"PreCompact":   {"my-pre-compact", "obliscence hook"},
+		"SessionStart": {"my-session-start", hookCommand()},
+		"SessionEnd":   {hookCommand()},
+		"PreCompact":   {"my-pre-compact", hookCommand()},
 		"Stop":         {"my-stop"},
 	} {
 		if got := hookCommands(t, path, event); !reflect.DeepEqual(got, want) {
@@ -145,9 +146,52 @@ func TestInstallHooksTwiceAddsOneEntry(t *testing.T) {
 	(&SetupCmd{}).installHooks()
 	(&SetupCmd{}).installHooks()
 
-	want := []string{"my-session-start", "obliscence hook"}
+	want := []string{"my-session-start", hookCommand()}
 	if got := hookCommands(t, path, "SessionStart"); !reflect.DeepEqual(got, want) {
 		t.Errorf("SessionStart hooks = %q, want %q", got, want)
+	}
+}
+
+// Rerunning setup rewrites an older bare entry to the current command in
+// place, keeping its other fields and the hooks beside it.
+func TestInstallHooksUpgradesAnOlderEntryInPlace(t *testing.T) {
+	path := settingsWith(t, `{
+  "hooks": {
+    "SessionEnd": [{"matcher": "", "hooks": [
+      {"type": "command", "command": "obliscence hook", "async": true, "timeout": 30},
+      {"type": "command", "command": "my-session-end"}
+    ]}]
+  }
+}`)
+
+	(&SetupCmd{}).installHooks()
+
+	want := []string{hookCommand(), "my-session-end"}
+	if got := hookCommands(t, path, "SessionEnd"); !reflect.DeepEqual(got, want) {
+		t.Errorf("SessionEnd hooks = %q, want %q", got, want)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"timeout": 30`) {
+		t.Errorf("lost a field on the upgraded entry:\n%s", data)
+	}
+
+	(&SetupCmd{}).installHooks()
+	again, _ := os.ReadFile(path)
+	if string(again) != string(data) {
+		t.Error("a second setup changed settings.json")
+	}
+}
+
+func TestHooksRunOnEfficiencyCoresOnMac(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the efficiency-core clamp is macOS only")
+	}
+	if got := hookCommand(); got != "taskpolicy -c background obliscence hook" {
+		t.Errorf("hookCommand() = %q", got)
+	}
+	want := `spawn("taskpolicy", ["-c", "background", "obliscence", "hook"]`
+	if !strings.Contains(piExtensionContent, want) {
+		t.Error("pi extension does not clamp obliscence to background QoS on macOS")
 	}
 }
 
