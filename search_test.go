@@ -216,6 +216,7 @@ func TestFiltersNeverDriveTheJoin(t *testing.T) {
 		{"before", SearchCmd{Before: "2026-07-18"}},
 		{"project", SearchCmd{Project: "proj"}},
 		{"source", SearchCmd{prov: "claude_code"}},
+		{"default (headless excluded)", SearchCmd{}},
 		{
 			"all",
 			SearchCmd{

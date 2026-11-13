@@ -500,6 +500,11 @@ obliscence search "$QUERY" --hybrid --after 2026-01-01 --before 2026-04-01 --jso
 # Filter by where the conversation happened: claude.ai, Claude Code, or pi
 obliscence search "$QUERY" --hybrid --source pi --json
 
+# Include headless sessions (claude -p, Agent SDK runs). Search and corrections
+# leave them out by default: their user messages are script prompts, often digests
+# quoting other sessions, so they bury what the person actually typed
+obliscence search "$QUERY" --headless --json
+
 # Sort by recency instead of relevance — use for "last time I mentioned X" queries
 # where the user wants the most recent match, not the most relevant one
 obliscence search "$QUERY" --sort=recent --json

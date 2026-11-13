@@ -22,6 +22,7 @@ type CorrectionsCmd struct {
 	MinScore int    `help:"Minimum correction score."                                                                                                                     default:"3"     name:"min-score"`
 	MaxLen   int    `help:"Ignore messages longer than this (chars) — real corrections are terse; long user-role text is injected skill/summary/agent content."           default:"300"   name:"max-len"`
 	Sort     string `help:"Sort order: score (default) or recent."                                                                                                        default:"score"                  enum:"score,recent"`
+	Headless bool   `help:"Include headless sessions (claude -p, Agent SDK runs), which are excluded by default."                                                                         name:"headless"`
 }
 
 // correctionPattern is a weighted cue. Higher weight = stronger signal that the
@@ -158,12 +159,23 @@ func (cmd *CorrectionsCmd) Run(rc *RunContext) error {
 	if err := checkProject(rc.DB, cmd.Project); err != nil {
 		return err
 	}
+	results, err := cmd.results(rc)
+	if err != nil {
+		return err
+	}
+	return cmd.print(rc, results)
+}
+
+func (cmd *CorrectionsCmd) results(rc *RunContext) ([]SearchResult, error) {
 	var where []string
 	var args []interface{}
 	where = append(where, "m.role = 'user'")
 	// Compaction/continuation summaries are injected as user-role text and read
 	// as corrections (they quote the conversation). Exclude them.
 	where = append(where, "m.is_compact_summary = 0")
+	if !cmd.Headless {
+		where = append(where, headlessClause)
+	}
 	if cmd.Project != "" {
 		where = append(where, "s.project_name LIKE ?")
 		args = append(args, "%"+cmd.Project+"%")
@@ -183,7 +195,7 @@ func (cmd *CorrectionsCmd) Run(rc *RunContext) error {
 		JOIN sessions s ON s.id = m.session_id
 		WHERE %s`, strings.Join(where, " AND ")), args...)
 	if err != nil {
-		return fmt.Errorf("corrections: %w", err)
+		return nil, fmt.Errorf("corrections: %w", err)
 	}
 	defer rows.Close()
 
@@ -194,7 +206,7 @@ func (cmd *CorrectionsCmd) Run(rc *RunContext) error {
 		if err := rows.Scan(
 			&r.MessageID, &r.SessionID, &r.Project, &r.Role, &r.Timestamp, &content, &r.GitBranch,
 		); err != nil {
-			return err
+			return nil, err
 		}
 		// Real corrections are terse; long user-role text is injected skill,
 		// summary, or agent-prompt content.
@@ -210,7 +222,7 @@ func (cmd *CorrectionsCmd) Run(rc *RunContext) error {
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	if cmd.Sort == "recent" {
@@ -229,8 +241,7 @@ func (cmd *CorrectionsCmd) Run(rc *RunContext) error {
 	if len(results) > cmd.Limit {
 		results = results[:cmd.Limit]
 	}
-
-	return cmd.print(rc, results)
+	return results, nil
 }
 
 func (cmd *CorrectionsCmd) print(rc *RunContext, results []SearchResult) error {

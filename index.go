@@ -143,6 +143,10 @@ func (cmd *IndexCmd) indexAll(rc *RunContext, roots []string, embedder *Embedder
 		fmt.Fprintf(os.Stderr, "pruned %d orphan vectors\n", pruned)
 	}
 
+	if err := backfillHeadless(rc.DB); err != nil {
+		return fmt.Errorf("backfilling headless: %w", err)
+	}
+
 	// Load all indexed file states into memory to avoid per-file DB queries.
 	indexedFiles, err := loadIndexedFiles(rc.DB)
 	if err != nil {
@@ -624,9 +628,10 @@ func prepareIndexStmts(tx *sql.Tx) (*indexStmts, error) {
 		return nil, err
 	}
 	s.upsertSession, err = tx.Prepare(`
-		INSERT INTO sessions (id, project_path, project_name, model, git_branch, started_at, updated_at, source_path, source_mtime, source_size, provenance)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO sessions (id, project_path, project_name, model, git_branch, started_at, updated_at, source_path, source_mtime, source_size, provenance, headless)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
+			headless = excluded.headless,
 			project_path = excluded.project_path,
 			project_name = excluded.project_name,
 			model = excluded.model,
@@ -730,6 +735,9 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 		if s := unquote(raw["gitBranch"]); s != "" {
 			sess.gitBranch = s
 		}
+		if isHeadlessEntrypoint(unquote(raw["entrypoint"])) {
+			sess.headless = true
+		}
 
 		switch msgType {
 		case "user":
@@ -793,7 +801,7 @@ func indexFile(tx *sql.Tx, stmts *indexStmts, path string) error {
 	}
 	_, err = stmts.upsertSession.Exec(
 		sess.id, sess.projectPath, sess.projectName, sess.model, sess.gitBranch,
-		sess.startedAt, sess.updatedAt, path, mtime, info.Size(), sess.provenance,
+		sess.startedAt, sess.updatedAt, path, mtime, info.Size(), sess.provenance, sess.headless,
 	)
 	if err != nil {
 		return fmt.Errorf("upserting session: %w", err)
@@ -968,6 +976,87 @@ type sessionMeta struct {
 	startedAt   string
 	updatedAt   string
 	provenance  string
+	headless    bool
+}
+
+// isHeadlessEntrypoint reports whether a Claude Code transcript's entrypoint
+// marks a scripted run: "sdk-cli" is claude -p, "sdk-py"/"sdk-ts" the Agent
+// SDK. Interactive sessions say "cli".
+func isHeadlessEntrypoint(entrypoint string) bool {
+	return strings.HasPrefix(entrypoint, "sdk-")
+}
+
+// backfillHeadless sets headless on Claude Code sessions indexed before the
+// column existed. Their files are unchanged, so a normal index never re-parses
+// them; reading each transcript up to its first entrypoint field is enough
+// (the first user line carries it). A missing file or one with no entrypoint
+// predates the field and was interactive.
+func backfillHeadless(db *sql.DB) error {
+	rows, err := db.Query(
+		"SELECT id, source_path FROM sessions WHERE headless IS NULL AND provenance = 'claude_code'",
+	)
+	if err != nil {
+		return err
+	}
+	type pending struct{ id, path string }
+	var todo []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.id, &p.path); err != nil {
+			rows.Close()
+			return err
+		}
+		todo = append(todo, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(todo) == 0 {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare("UPDATE sessions SET headless = ? WHERE id = ?")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, p := range todo {
+		if _, err := stmt.Exec(isHeadlessEntrypoint(firstEntrypoint(p.path)), p.id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// firstEntrypoint returns the first "entrypoint" value in a transcript, reading
+// at most the first 50 lines, or "" when there is none.
+func firstEntrypoint(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	marker := []byte(`"entrypoint":"`)
+	r := bufio.NewReaderSize(f, 1<<16)
+	for i := 0; i < 50; i++ {
+		line, err := r.ReadBytes('\n')
+		if at := bytes.Index(line, marker); at >= 0 {
+			rest := line[at+len(marker):]
+			if end := bytes.IndexByte(rest, '"'); end >= 0 {
+				return string(rest[:end])
+			}
+		}
+		if err != nil {
+			return ""
+		}
+	}
+	return ""
 }
 
 type parsedMessage struct {

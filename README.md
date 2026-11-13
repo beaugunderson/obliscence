@@ -68,8 +68,11 @@ Pi auto-saves sessions to `~/.pi/agent/sessions/` by default; no extension is ne
 --hybrid           FTS5 + semantic via reciprocal rank fusion
 --semantic-weight  Hybrid: weight semantic results vs keyword (default 1.0; >1 favors conceptual matches)
 --sort             relevance (default) or recent
+--headless         Include headless sessions (claude -p, Agent SDK runs)
 --json             Machine-readable output
 ```
+
+`search` and `corrections` leave out headless Claude Code sessions (transcript `entrypoint` of `sdk-cli`, `sdk-py`, or `sdk-ts`) unless `--headless` is passed. Their user messages are script prompts, not something a person typed.
 
 `--project`, `--role`, `--after`, `--before`, and `--source` scope the candidate set in every mode, including the vector half of `--semantic` and `--hybrid`, so a scoped search ranks over the scoped rows and returns a full `--limit` worth of them. A flag a mode cannot act on is an error rather than a no-op: `--exact` needs the keyword matcher (use `--hybrid` to phrase-match its keyword half), `--semantic-weight` needs the two rankings `--hybrid` fuses, and `--semantic` and `--hybrid` are mutually exclusive.
 

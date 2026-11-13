@@ -60,6 +60,7 @@ type SearchCmd struct {
 	Hybrid         bool    `       help:"Combine FTS5 and semantic search."                                                                      name:"hybrid"`
 	Sort           string  `       help:"Sort order: relevance (default) or recent."                                                                                    default:"relevance" enum:"relevance,recent"`
 	SemanticWeight float64 `       help:"Hybrid: weight semantic results relative to keyword (>1 favors semantic/conceptual matches)."           name:"semantic-weight" default:"1.0"`
+	Headless       bool    `       help:"Include headless sessions (claude -p, Agent SDK runs), which are excluded by default."                  name:"headless"`
 
 	prov string // resolved provenance filter, validated in Run
 }
@@ -177,6 +178,11 @@ func (cmd *SearchCmd) semanticResults(
 	return results, nil
 }
 
+// headlessClause drops scripted sessions: their user-role text is a prompt no
+// person typed, often a digest quoting other sessions' messages. NULL (not yet
+// backfilled) counts as interactive.
+const headlessClause = "s.headless IS NOT 1"
+
 // filterClauses returns the SQL predicates (and their args) for every scope flag,
 // written against the aliases m (messages) and s (sessions). Each retrieval
 // branch applies these to its own candidate set, so keyword and vector search
@@ -204,6 +210,9 @@ func (cmd *SearchCmd) filterClauses() ([]string, []interface{}) {
 	if cmd.prov != "" {
 		where = append(where, "s.provenance = ?")
 		args = append(args, cmd.prov)
+	}
+	if !cmd.Headless {
+		where = append(where, headlessClause)
 	}
 	return where, args
 }

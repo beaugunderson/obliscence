@@ -62,6 +62,19 @@ func initSchema(db *sql.DB) error {
 		}
 	}
 
+	// headless: 1 for scripted Claude Code sessions (claude -p, the Agent SDK),
+	// 0 otherwise. NULL on rows indexed before the column existed, until
+	// backfillHeadless reads their transcripts on the next index.
+	if added, err := ensureColumn(db, "sessions", "headless", "INTEGER"); err != nil {
+		return err
+	} else if added {
+		if _, err := db.Exec(
+			"UPDATE sessions SET headless = 0 WHERE provenance != 'claude_code'",
+		); err != nil {
+			return err
+		}
+	}
+
 	// Migrate the vector store when the embedding model/layout changes. All old
 	// vectors are invalid across models, so drop and recreate the vec table and
 	// clear the embedding-tracking table to force a full re-embed on next index.
@@ -124,6 +137,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     project_path TEXT NOT NULL,
     project_name TEXT NOT NULL,
     provenance TEXT NOT NULL DEFAULT 'claude_code',
+    headless INTEGER,
     model TEXT,
     git_branch TEXT,
     started_at TEXT,
